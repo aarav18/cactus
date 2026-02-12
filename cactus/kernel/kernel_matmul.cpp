@@ -165,9 +165,7 @@ void cactus_matmul_f16_sme2_caller(
 	__fp16* c,
 	size_t M,
 	size_t K,
-	size_t N,
-	size_t start_row,
-	size_t end_row
+	size_t N
 );
 #endif
 
@@ -203,7 +201,14 @@ void cactus_matmul_f16(
     }
 #endif
 
-    constexpr size_t TILE_M = 4;
+#if defined(CACTUS_COMPILE_SME2)
+	cactus_matmul_f16_sme2_caller(
+		a, b_transposed, c,
+		M, K, N
+	);
+
+#else
+	constexpr size_t TILE_M = 4;
     const size_t num_row_blocks = (M + TILE_M - 1) / TILE_M;
 
     CactusThreading::parallel_for(num_row_blocks, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
@@ -212,22 +217,16 @@ void cactus_matmul_f16(
                 size_t start_row = block_idx * TILE_M;
                 size_t end_row = std::min(start_row + TILE_M, M);
 
-#if defined(CACTUS_COMPILE_SME2)
-				cactus_matmul_f16_sme2_caller(
-					a, b_transposed, c,
-					M, K, N,
-					start_row, end_row
-				);
-#else
                 cactus_matmul_f16_worker(
                     a, b_transposed, c,
                     M, K, N,
                     start_row, end_row
                 );
-#endif
 
             }
         });
+
+#endif
 }
 
 
