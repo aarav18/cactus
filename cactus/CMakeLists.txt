@@ -28,6 +28,23 @@ function(cactus_require_vendored_curl include_dir library_path platform_label)
     endif()
 endfunction()
 
+option(CACTUS_ENABLE_SME2 "Enable compiling SME2 kernels when supported" ON)
+
+set(CACTUS_BUILD_SME2 0)
+if(APPLE AND CACTUS_ENABLE_SME2)
+	execute_process(
+		COMMAND /usr/sbin/sysctl -n hw.optional.arm.FEAT_SME2
+		OUTPUT_VARIABLE CACTUS_HW_SME2
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		ERROR_QUIET
+	)
+
+	if(CACTUS_HW_SME2 STREQUAL "1")
+		set(CACTUS_BUILD_SME2 1)
+		message(STATUS "ARM SME2 support detected - building SME2 kernels")
+	endif()
+endif()
+
 if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -arch arm64 -march=armv8.2-a+fp16+simd+dotprod+i8mm -pthread -Wall -Wextra -pedantic -O3 -Wno-missing-field-initializers")
@@ -65,6 +82,9 @@ file(GLOB KERNEL_SOURCES "kernel/*.cpp")
 file(GLOB FFI_SOURCES "ffi/*.cpp")
 file(GLOB MODEL_SOURCES "models/*.cpp")
 file(GLOB TELEMETRY_SOURCES "telemetry/*.cpp")
+
+set(CACTUS_SME2_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernel/kernel_sme2.cpp")
+list(REMOVE_ITEM KERNEL_SOURCES "${CACTUS_SME2_SOURCE}")
 
 if(APPLE)
     set(NPU_SOURCES "npu/npu_ane.mm")
@@ -123,12 +143,41 @@ function(configure_cactus_target target_name)
     endif()
 endfunction()
 
-add_library(cactus STATIC ${COMMON_SOURCES})
+if(CACTUS_BUILD_SME2)
+	add_library(cactus_sme2_obj OBJECT ${CACTUS_SME2_SOURCE})
+	target_include_directories(cactus_sme2_obj PRIVATE ${COMMON_INCLUDES})
+
+	target_compile_options(cactus_sme2_obj PRIVATE
+		-march=armv9.2-a+nosve+nosve2+sme2
+	)
+	#set_source_files_properties("${CACTUS_SME2_SOURCE}" PROPERTIES COMPILE_FLAGS "-march=armv9.2-a+sve+sve2+sme+sme2")
+
+	set_target_properties(cactus_sme2_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
+	target_compile_definitions(cactus_sme2_obj PRIVATE CACTUS_COMPILE_SME2)
+endif()
+
+if(CACTUS_BUILD_SME2)
+	add_library(cactus STATIC ${COMMON_SOURCES} $<TARGET_OBJECTS:cactus_sme2_obj>)
+else()
+	add_library(cactus STATIC ${COMMON_SOURCES})
+endif()
 configure_cactus_target(cactus)
 
-add_library(cactus_ffi SHARED ${COMMON_SOURCES})
+if(CACTUS_BUILD_SME2)
+	target_compile_definitions(cactus PRIVATE CACTUS_COMPILE_SME2)
+endif()
+
+if(CACTUS_BUILD_SME2)
+	add_library(cactus_ffi SHARED ${COMMON_SOURCES} $<TARGET_OBJECTS:cactus_sme2_obj>)
+else()
+	add_library(cactus_ffi SHARED ${COMMON_SOURCES})
+endif()
 configure_cactus_target(cactus_ffi)
 set_target_properties(cactus_ffi PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     OUTPUT_NAME "cactus"
 )
+
+if(CACTUS_BUILD_SME2)
+	target_compile_definitions(cactus_ffi PRIVATE CACTUS_COMPILE_SME2)
+endif()

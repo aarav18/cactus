@@ -3,10 +3,6 @@
 #include "../graph/graph.h"
 #include <arm_neon.h>
 #include <cstdint>
-#if defined(__ARM_FEATURE_SME2)
-#include <arm_sve.h>
-#include <arm_sme.h>
-#endif
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -162,9 +158,8 @@ static void cactus_matmul_f16_worker(
     }
 }
 
-
-#if defined(__ARM_FEATURE_SME2)
-static void cactus_matmul_f16_sme2_worker(
+#if defined(CACTUS_COMPILE_SME2)
+void cactus_matmul_f16_sme2_caller(
 	const __fp16* a,
 	const __fp16* b_transposed,
 	__fp16* c,
@@ -173,60 +168,7 @@ static void cactus_matmul_f16_sme2_worker(
 	size_t N,
 	size_t start_row,
 	size_t end_row
-) __arm_streaming __arm_inout("za") {
-	(void) M;
-	if (start_row >= end_row) return;
-	
-	const size_t SVLw = svcntsw();
-
-	const size_t TILE_M = SVLw;
-	const size_t TILE_N = SVLw;
-
-	// TODO: multi-vector / multi-tile operations
-	for (size_t row = start_row; row < end_row; row += TILE_M) {
-		const size_t active_rows = std::min(TILE_M, end_row - row);
-		const svbool_t pM16 = svwhilelt_b16(0, active_rows);
-
-		// TODO: no VLA
-		__fp16 a_panel[K * TILE_M];
-		std::memset(a_panel, 0, K * TILE_M * sizeof(__fp16));
-		for (size_t k = 0; k < K; ++k) {
-			for (size_t m = 0; m < active_rows; ++m) {
-				a_panel[k * TILE_M + m] = a[(row + m) * K + k];
-			}
-		}
-
-		for (size_t col = 0; col < N; col += TILE_N) {
-			const size_t active_cols = std::min(TILE_N, N - col);
-			const svbool_t pN16 = svwhilelt_b16(0, active_cols);
-			const svbool_t pN32 = svwhilelt_b32(col, N);
-
-
-			// TODO: no VLA
-			__fp16 b_panel[K * TILE_N];
-			std::memset(b_panel, 0, K * TILE_N * sizeof(__fp16));
-			for (size_t k = 0; k < K; ++k) {
-				for (size_t n = 0; n < active_cols; ++n) {
-					b_panel[k * TILE_N + n] = b_transposed[(col + n) * K + k];
-				}
-			}
-
-			svzero_za();
-			for (size_t k = 0; k < K; ++k) {
-				const svfloat16_t zL = svld1(pM16, &a_panel[k * TILE_M]);
-				const svfloat16_t zR = svld1(pN16, &b_panel[k * TILE_N]);
-				svmopa_za32_f16_m(0, pM16, pN16, zL, zR);
-			}
-
-			
-			for (size_t m = 0; m < active_rows; ++m) {
-				const svfloat32_t outRow32 = svread_hor_za32_f32_m(svdup_n_f32(0.0f), pN32, 0, m);
-				const svfloat16_t outRow16 = svcvt_f16_f32_z(pN32, outRow32);
-				svst1(pN16, &c[(row + m) * N + col], outRow16);
-			}
-		}
-	}
-}
+);
 #endif
 
 void cactus_matmul_f16(
@@ -270,8 +212,8 @@ void cactus_matmul_f16(
                 size_t start_row = block_idx * TILE_M;
                 size_t end_row = std::min(start_row + TILE_M, M);
 
-#if defined(__ARM_FEATURE_SME2)
-				cactus_matmul_f16_sme2_worker(
+#if defined(CACTUS_COMPILE_SME2)
+				cactus_matmul_f16_sme2_caller(
 					a, b_transposed, c,
 					M, K, N,
 					start_row, end_row
