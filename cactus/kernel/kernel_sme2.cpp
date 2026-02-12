@@ -76,19 +76,42 @@ static void cactus_matmul_f16_sme2_worker(
 }
 
 __arm_new("za") __arm_locally_streaming
+static void cactus_matmul_f16_sme2_thread_entry(
+	const __fp16* a, const __fp16* b_transposed, __fp16* c,
+	size_t M, size_t K, size_t N,
+	size_t TILE_M, size_t start_block, size_t end_block
+) {
+	for (size_t block_idx = start_block; block_idx < end_block; ++block_idx) {
+        size_t start_row = block_idx * TILE_M;
+		size_t end_row = std::min(start_row + TILE_M, M);
+
+		cactus_matmul_f16_sme2_worker(
+			a, b_transposed, c,
+			M, K, N,
+			start_row, end_row
+		);
+    }
+}
+
+
+__arm_new("za") __arm_locally_streaming
 void cactus_matmul_f16_sme2_caller(
 	const __fp16* a,
 	const __fp16* b_transposed,
 	__fp16* c,
 	size_t M,
 	size_t K,
-	size_t N,
-	size_t start_row,
-	size_t end_row
+	size_t N
 ) {
-	cactus_matmul_f16_sme2_worker(
-		a, b_transposed, c,
-		M, K, N,
-		start_row, end_row
-	);
+	const size_t TILE_M = svcntsw();
+    const size_t num_row_blocks = (M + TILE_M - 1) / TILE_M;
+
+    CactusThreading::parallel_for(num_row_blocks, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
+        [=](size_t start_block, size_t end_block) {
+			cactus_matmul_f16_sme2_thread_entry(
+				a, b_transposed, c,
+				M, K, N,
+				TILE_M, start_block, end_block
+			);
+        });
 }
