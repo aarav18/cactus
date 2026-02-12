@@ -171,12 +171,15 @@ void cactus_matmul_f16(
 ) {
 
 #if defined(CACTUS_COMPILE_SME2)
-	cactus_matmul_f16_sme2_caller(
-		a, b_transposed, c,
-		M, K, N
-	);
+	if (cpu_has_sme2()) {
+		cactus_matmul_f16_sme2_caller(
+			a, b_transposed, c,
+			M, K, N
+		);
+		return;
+	}
+#endif
 
-#else
 	constexpr size_t TILE_M = 4;
     const size_t num_row_blocks = (M + TILE_M - 1) / TILE_M;
 
@@ -194,8 +197,6 @@ void cactus_matmul_f16(
 
             }
         });
-
-#endif
 }
 
 
