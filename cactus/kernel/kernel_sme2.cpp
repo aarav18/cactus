@@ -1,3 +1,7 @@
+#include <arm_sve.h>
+#include <cstdint>
+#include <iostream>
+#include <ostream>
 #ifndef __ARM_FEATURE_SME2
 #error "kernel_sme2.cpp must be compiled with SME2 enabled (e.g. -march=armv9.2-a+sme2)"
 #endif
@@ -17,33 +21,46 @@ static void cactus_matmul_f16_sme2_worker(
 	size_t start_row,
 	size_t end_row,
 	size_t TILE_M,
-	size_t TILE_N
+	size_t TILE_N,
+	float* tmp
 ) __arm_streaming __arm_inout("za") {
 	(void) M;
 	if (start_row >= end_row) return;
-	
-	// TODO: multi-vector / multi-tile operations
+
 	for (size_t row = start_row; row < end_row; row += TILE_M) {
 		const size_t active_rows = std::min(TILE_M, end_row - row);
+		const svbool_t pMh = svwhilelt_b16(0, active_rows * 2);
 		const svbool_t pM16 = svwhilelt_b16(0, active_rows);
+		const svbool_t pMDim = svwhilelt_b32((uint64_t) row, (uint64_t) end_row);
 
 		for (size_t col = 0; col < N; col += TILE_N) {
 			const size_t active_cols = std::min(TILE_N, N - col);
+			const svbool_t pNh = svwhilelt_b16(0, active_cols * 2);
 			const svbool_t pN16 = svwhilelt_b16(0, active_cols);
 			const svbool_t pN32 = svwhilelt_b32((uint64_t) 0, (uint64_t) active_cols);
+			const svbool_t pNDim = svwhilelt_b32((uint64_t) col, (uint64_t) N);
 
 			svzero_za();
-			for (size_t k = 0; k < K; ++k) {
-				const svfloat16_t zL = svld1(pM16, &a_transposed[k * M + row]);
-				const svfloat16_t zR = svld1(pN16, &b[k * N + col]);
-				svmopa_za32_f16_m(0, pM16, pN16, zL, zR);
+			for (size_t k = 0; k < K; k += 2) {
+				svfloat16_t a0 = svld1(pM16, &a_transposed[(k + 0) * M + row]);
+				svfloat16_t a1 = (k + 1 < K) ? svld1(pM16, &a_transposed[(k + 1) * M + row]) : svdup_n_f16(0);
+				svfloat16_t b0 = svld1(pN16, &b[(k + 0) * N + col]);
+				svfloat16_t b1 = (k + 1 < K) ? svld1(pN16, &b[(k + 1) * N + col]) : svdup_n_f16(0);
+				
+				svfloat16_t zL = svzip1_f16(a0, a1);
+				svfloat16_t zR = svzip1_f16(b0, b1);
+				svmopa_za32_f16_m(0, pMh, pNh, zL, zR);
 			}
 
-			
 			for (size_t m = 0; m < active_rows; ++m) {
-				const svfloat32_t outRow32 = svread_hor_za32_f32_m(svdup_n_f32(0.0f), pN32, 0, m);
-				const svfloat16_t outRow16 = svcvt_f16_f32_z(pN32, outRow32);
-				svst1(pN16, &c[(row + m) * N + col], outRow16);
+				svbool_t p_lane = svpsel_lane_b32(pNDim, pMDim, row + m);
+				svst1_hor_za32(0, m, p_lane, tmp);
+				
+				svfloat32_t out32 = svld1(pN32, tmp);
+				svfloat16_t out16 = svcvt_f16_f32_z(pN32, out32);
+				out16 = svuzp1_f16(out16, out16);
+
+				svst1(pN16, &c[(row + m) * N + col], out16);
 			}
 		}
 	}
@@ -58,6 +75,8 @@ static void cactus_matmul_f16_sme2_thread_entry(
 	const size_t TILE_M = svcntsw();
 	const size_t TILE_N = TILE_M;
 	
+	std::vector<float> tmp(TILE_M);		
+	
 	for (size_t block_idx = start_block; block_idx < end_block; ++block_idx) {
         size_t start_row = block_idx * ROW_BLOCK_SIZE;
 		size_t end_row = std::min(start_row + ROW_BLOCK_SIZE, M);
@@ -66,7 +85,8 @@ static void cactus_matmul_f16_sme2_thread_entry(
 			a_transposed, b, c,
 			M, K, N,
 			start_row, end_row,
-			TILE_M, TILE_N
+			TILE_M, TILE_N,
+			tmp.data()
 		);
     }
 }
@@ -99,7 +119,6 @@ void cactus_matmul_f16_sme2_caller(
 	size_t K,
 	size_t N
 ) {
-
 	std::vector<__fp16> aT_storage(K * M);
 	std::vector<__fp16> b_storage(K * N);
 
@@ -108,10 +127,25 @@ void cactus_matmul_f16_sme2_caller(
 
 	cactus_transpose_2d_f16_parallel(a, a_T, M, K);
 	cactus_transpose_2d_f16_parallel(b_transposed, b, N, K);
-
+	
+	
 	const size_t TILE_M = svcntsw();
 
-	constexpr size_t TILES_PER_THREAD = 4;
+	std::vector<float> tmp(TILE_M);
+
+	cactus_matmul_f16_sme2_worker(
+		a_T, b, c,
+		M, K, N,
+		0, M,
+		TILE_M, TILE_M,
+		tmp.data()
+	);
+
+	return;
+
+	// const size_t TILE_M = svcntsw();
+
+	constexpr size_t TILES_PER_THREAD = 32;
 	const size_t ROW_BLOCK_SIZE = TILES_PER_THREAD * TILE_M;
     const size_t num_row_blocks = (M + ROW_BLOCK_SIZE - 1) / ROW_BLOCK_SIZE;
 
