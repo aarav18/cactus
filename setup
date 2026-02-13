@@ -44,10 +44,10 @@ fi
 echo ""
 echo -e "${BLUE}Step 2: Setting up Python virtual environment...${NC}"
 
-if ! command -v python3 &> /dev/null || ! command -v pip &> /dev/null; then
-    echo -e "${RED}Error: python3 or pip is not installed${NC}"
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}Error: python3 is not installed${NC}"
     echo ""
-    echo "Please install python3 and pip:"
+    echo "Please install python3:"
     echo "  macOS:        brew install python3"
     echo "  Ubuntu/Debian: sudo apt-get install python3 python3-venv python3-pip"
     exit 1
@@ -71,10 +71,10 @@ source "$VENV_DIR/bin/activate"
 echo ""
 echo -e "${BLUE}Step 3: Installing Python dependencies...${NC}"
 
-pip install --upgrade pip -q
+python3 -m pip install --upgrade pip -q
 
 if [ -f "$REQUIREMENTS_FILE" ]; then
-    if pip install -r "$REQUIREMENTS_FILE" -q; then
+    if python3 -m pip install -r "$REQUIREMENTS_FILE" -q; then
         echo -e "${GREEN}✓ Dependencies installed${NC}"
     else
         echo -e "${RED}Failed to install dependencies${NC}"
@@ -88,7 +88,7 @@ if [ -f "$PARENT_REQUIREMENTS" ] && [ "$PARENT_REQUIREMENTS" != "$REQUIREMENTS_F
     echo ""
     echo -e "${BLUE}Detected parent repo requirements at: $PARENT_REQUIREMENTS${NC}"
     echo -e "${BLUE}Installing parent repo requirements...${NC}"
-    if pip install -r "$PARENT_REQUIREMENTS" -q; then
+    if python3 -m pip install -r "$PARENT_REQUIREMENTS" -q; then
         echo -e "${GREEN}✓ Parent repo dependencies installed${NC}"
     else
         echo -e "${YELLOW}Warning: failed to install parent repo requirements${NC}"
@@ -98,7 +98,7 @@ fi
 echo ""
 echo -e "${BLUE}Step 4: Installing cactus CLI tools...${NC}"
 
-if pip install -e "$PROJECT_ROOT/python" --quiet; then
+if python3 -m pip install -e "$PROJECT_ROOT/python" --quiet; then
     echo -e "${GREEN}✓ Cactus CLI installed${NC}"
 else
     echo -e "${RED}Failed to install cactus CLI${NC}"

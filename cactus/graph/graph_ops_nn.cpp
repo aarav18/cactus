@@ -341,7 +341,8 @@ void compute_attention_int8_hybrid_node(GraphNode& node, const std::vector<std::
         node.output_buffer.data_as<__fp16>(),
         batch_size, seq_len, cache_len, new_len,
         num_q_heads, num_kv_heads, head_dim,
-        node.params.scale, node.params.position_offset, true
+        node.params.scale, node.params.position_offset, true,
+        node.params.window_size
     );
 }
 

@@ -112,8 +112,6 @@ int cactus_transcribe(
             std::vector<float> waveform_16k = resample_to_16k_fp32(waveform_fp32, WHISPER_SAMPLE_RATE); 
             
             if (is_moonshine) {
-                 size_t silence_samples = 4800; // 300ms * 16000
-                 waveform_16k.insert(waveform_16k.end(), silence_samples, 0.0f);
                  audio_features = waveform_16k;
             } else {
                  if (!waveform_16k.empty()) {
@@ -129,8 +127,6 @@ int cactus_transcribe(
              std::vector<float> waveform_16k = resample_to_16k_fp32(audio.samples, audio.sample_rate);
              
              if (is_moonshine) {
-                 size_t silence_samples = 4800; // 300ms * 16000
-                 waveform_16k.insert(waveform_16k.end(), silence_samples, 0.0f);
                  audio_features = waveform_16k;
              } else {
                   auto cfg = get_whisper_spectrogram_config();

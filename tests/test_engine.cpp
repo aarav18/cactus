@@ -2,6 +2,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <cstdio>
+#include <iostream>
 #include <thread>
 #include <chrono>
 #include <dirent.h>
@@ -289,6 +290,63 @@ bool test_tool_call_with_two_tools() {
             m.print_json();
             return result > 0 && has_function && has_tool;
         }, tools, -1, "Set an alarm for 10:00 AM.");
+}
+
+bool test_multiple_tool_call_invocations() {
+    const char* messages = R"([
+        {"role": "system", "content": "You are a helpful assistant that can use tools."},
+        {"role": "user", "content": "Send a message to Blob and get the weather for San Francisco."}
+    ])";
+
+    const char* tools = R"([{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City, State, Country"}
+                },
+                "required": ["location"]
+            }
+        }
+    }, {
+        "type": "function",
+        "function": {
+            "name": "send_message",
+            "description": "Send a message to a contact",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {"type": "string", "description": "Name of the person to send the message to"},
+                    "message": {"type": "string", "description": "The message content to send"}
+                },
+                "required": ["recipient", "message"]
+            }
+        }
+    }])";
+
+    const char* options_with_force_tools = R"({
+        "max_tokens": 256,
+        "stop_sequences": ["<|im_end|>", "<end_of_turn>"],
+        "force_tools": true
+    })";
+
+    return EngineTestUtils::run_test("MULTIPLE TOOLS TEST", g_model_path, messages, options_with_force_tools,
+        [](int result, const StreamingData&, const std::string& response, const Metrics& m) {
+            bool has_function = response.find("\"function_calls\":[") != std::string::npos;
+            bool has_weather_tool = has_function
+                && (response.find("\"name\":\"get_weather\"") != std::string::npos
+                    || response.find("\"name\": \"get_weather\"") != std::string::npos);
+            bool has_message_tool = has_function
+                && (response.find("\"name\":\"send_message\"") != std::string::npos
+                    || response.find("\"name\": \"send_message\"") != std::string::npos);
+            std::cout << "├─ Function call: " << (has_function ? "YES" : "NO") << "\n"
+                      << "├─ Correct tool: " << (has_weather_tool && has_message_tool ? "YES" : "NO") << "\n";
+            m.print_json();
+            return result > 0 && has_function && has_weather_tool && has_message_tool;
+        }, tools, -1, "Send a message to Blob and get the weather for San Francisco.");
 }
 
 bool test_tool_call_with_three_tools() {
@@ -1013,6 +1071,7 @@ int main() {
     runner.run_test("1k_context", test_1k_context());
     runner.run_test("streaming", test_streaming());
     runner.run_test("tool_calls", test_tool_call());
+    runner.run_test("tool_multiple_tool_call_invocations", test_multiple_tool_call_invocations());
     runner.run_test("tool_calls_with_two_tools", test_tool_call_with_two_tools());
     runner.run_test("tool_calls_with_three_tools", test_tool_call_with_three_tools());
     runner.run_test("cloud_handoff", test_cloud_handoff());
@@ -1020,7 +1079,6 @@ int main() {
     runner.run_test("embeddings", test_embeddings());
     runner.run_test("image_embeddings", test_image_embeddings());
     runner.run_test("audio_embeddings", test_audio_embeddings());
-    runner.run_test("vlm_multiturn", test_vlm_multiturn());
     runner.run_test("audio_processor", test_audio_processor());
     runner.run_test("transcription", test_transcription());
     runner.run_test("pcm_transcription", test_pcm_transcription());

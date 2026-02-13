@@ -318,10 +318,11 @@ size_t CactusGraph::attention(size_t query, size_t key, size_t value, float scal
 size_t CactusGraph::attention_int8_hybrid(size_t query, size_t key_new, size_t value_new, float scale, size_t position_offset,
                                           const int8_t* cached_keys, const int8_t* cached_values,
                                           const float* k_scales, const float* v_scales,
-                                          size_t cache_len, size_t num_kv_heads, size_t head_dim) {
+                                          size_t cache_len, size_t num_kv_heads, size_t head_dim, size_t window_size) {
     OpParams params;
     params.scale = scale;
     params.position_offset = position_offset;
+    params.window_size = window_size;
     params.cached_keys_int8 = cached_keys;
     params.cached_values_int8 = cached_values;
     params.cached_k_scales = k_scales;
@@ -710,4 +711,5 @@ bool CactusGraph::is_populated(size_t persistent_node_id) const {
 
 void CactusGraph::invalidate_persistent(size_t persistent_node_id) {
     populated_node_ids_.erase(persistent_node_id);
+    persistent_node_ids_.erase(persistent_node_id);
 }

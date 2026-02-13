@@ -109,7 +109,7 @@ void cactus_attention_hybrid_int8_fp16(
     __fp16* output,
     size_t batch_size, size_t seq_len, size_t cache_len, size_t new_len,
     size_t num_q_heads, size_t num_kv_heads, size_t head_dim,
-    float scale, size_t position_offset = 0, bool is_causal = true,
+    float scale, size_t position_offset = 0, bool is_causal = true, size_t window_size = 0,
     size_t group_size = KV_QUANT_GROUP_SIZE);
 
 void cactus_conv1d_causal_depthwise_f16(

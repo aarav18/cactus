@@ -330,7 +330,7 @@ static void conv1d_f16_accelerate(
             const __fp16* Wc = Woc + ic * K;
 
             for (size_t i = 0; i < L; ++i) input_f32[i] = (float)Xc[i];
-            for (size_t k = 0; k < K; ++k) weight_f32[K - 1 - k] = (float)Wc[k];
+            for (size_t k = 0; k < K; ++k) weight_f32[k] = (float)Wc[k];
 
             if (stride == 1) {
                 std::vector<float> conv_out(out_len);
