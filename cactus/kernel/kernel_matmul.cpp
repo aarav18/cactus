@@ -159,6 +159,8 @@ static void cactus_matmul_f16_worker(
 }
 
 #if defined(CACTUS_COMPILE_SME2)
+constexpr size_t SME2_M_THRESHOLD = 4;
+
 void cactus_matmul_f16_sme2_caller(
 	const __fp16* a,
 	const __fp16* b_transposed,
@@ -202,7 +204,7 @@ void cactus_matmul_f16(
 #endif
 
 #if defined(CACTUS_COMPILE_SME2)
-	if (cpu_has_sme2()) {
+	if (cpu_has_sme2() && M >= SME2_M_THRESHOLD) {
 		cactus_matmul_f16_sme2_caller(
 			a, b_transposed, c,
 			M, K, N
