@@ -1,27 +1,18 @@
 #include <arm_sve.h>
 #include <cstdint>
-#include <iostream>
-#include <ostream>
 #ifndef __ARM_FEATURE_SME2
 #error "kernel_sme2.cpp must be compiled with SME2 enabled (e.g. -march=armv9.2-a+sme2)"
 #endif
 
 #include "kernel.h"
 #include "kernel_utils.h"
-#include <vector>
 #include <arm_sme.h>
 
 static void cactus_matmul_f16_sme2_worker(
-	const __fp16* a_transposed,
-	const __fp16* b,
-	__fp16* c,
-	size_t M,
-	size_t K,
-	size_t N,
-	size_t start_row,
-	size_t end_row,
-	size_t TILE_M,
-	size_t TILE_N,
+	const __fp16* a_transposed, const __fp16* b, __fp16* c,
+	size_t M, size_t K, size_t N,
+	size_t start_row, size_t end_row,
+	size_t TILE_M, size_t TILE_N,
 	float* tmp
 ) __arm_streaming __arm_inout("za") {
 	(void) M;
@@ -72,10 +63,8 @@ static void cactus_matmul_f16_sme2_thread_entry(
 	size_t M, size_t K, size_t N,
 	size_t ROW_BLOCK_SIZE, size_t start_block, size_t end_block
 ) {
-	const size_t TILE_M = svcntsw();
-	const size_t TILE_N = TILE_M;
-	
-	std::vector<float> tmp(TILE_M);		
+	const size_t TILE = svcntsw();
+	std::vector<float> tmp(TILE);		
 	
 	for (size_t block_idx = start_block; block_idx < end_block; ++block_idx) {
         size_t start_row = block_idx * ROW_BLOCK_SIZE;
@@ -85,7 +74,7 @@ static void cactus_matmul_f16_sme2_thread_entry(
 			a_transposed, b, c,
 			M, K, N,
 			start_row, end_row,
-			TILE_M, TILE_N,
+			TILE, TILE,
 			tmp.data()
 		);
     }
@@ -128,25 +117,8 @@ void cactus_matmul_f16_sme2_caller(
 	cactus_transpose_2d_f16_parallel(a, a_T, M, K);
 	cactus_transpose_2d_f16_parallel(b_transposed, b, N, K);
 	
-	
-	const size_t TILE_M = svcntsw();
-
-	std::vector<float> tmp(TILE_M);
-
-	cactus_matmul_f16_sme2_worker(
-		a_T, b, c,
-		M, K, N,
-		0, M,
-		TILE_M, TILE_M,
-		tmp.data()
-	);
-
-	return;
-
-	// const size_t TILE_M = svcntsw();
-
-	constexpr size_t TILES_PER_THREAD = 32;
-	const size_t ROW_BLOCK_SIZE = TILES_PER_THREAD * TILE_M;
+	constexpr size_t TILES_PER_THREAD = 2;
+	const size_t ROW_BLOCK_SIZE = TILES_PER_THREAD * svcntsw();
     const size_t num_row_blocks = (M + ROW_BLOCK_SIZE - 1) / ROW_BLOCK_SIZE;
 
     CactusThreading::parallel_for(num_row_blocks, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
