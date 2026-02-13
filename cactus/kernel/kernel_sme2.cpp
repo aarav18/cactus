@@ -19,39 +19,65 @@ static void cactus_matmul_f16_sme2_worker(
 	if (start_row >= end_row) return;
 
 	for (size_t row = start_row; row < end_row; row += TILE_M) {
-		const size_t active_rows = std::min(TILE_M, end_row - row);
-		const svbool_t pMh = svwhilelt_b16(0, active_rows * 2);
-		const svbool_t pM16 = svwhilelt_b16(0, active_rows);
+		const size_t active_r = std::min(TILE_M, end_row - row);
+		const svbool_t pMh = svwhilelt_b16(0, active_r * 2);
+		const svbool_t pM16 = svwhilelt_b16(0, active_r);
 		const svbool_t pMDim = svwhilelt_b32((uint64_t) row, (uint64_t) end_row);
 
-		for (size_t col = 0; col < N; col += TILE_N) {
-			const size_t active_cols = std::min(TILE_N, N - col);
-			const svbool_t pNh = svwhilelt_b16(0, active_cols * 2);
-			const svbool_t pN16 = svwhilelt_b16(0, active_cols);
-			const svbool_t pN32 = svwhilelt_b32((uint64_t) 0, (uint64_t) active_cols);
-			const svbool_t pNDim = svwhilelt_b32((uint64_t) col, (uint64_t) N);
+		for (size_t col0 = 0; col0 < N; col0 += 2 * TILE_N) {
+			const size_t col1 = col0 + TILE_N;	
+
+			const size_t active_c0 = std::min(TILE_N, N - col0);
+			const svbool_t pNh0 = svwhilelt_b16(0, active_c0 * 2);
+			const svbool_t pN16_0 = svwhilelt_b16(0, active_c0);
+			const svbool_t pN32_0 = svwhilelt_b32((uint64_t) 0, (uint64_t) active_c0);
+			const svbool_t pNDim0 = svwhilelt_b32((uint64_t) col0, (uint64_t) N);
+
+			const size_t active_c1 = (col1 < N) ? std::min(TILE_N, N - col1) : 0;
+			const svbool_t pNh1 = svwhilelt_b16(0, active_c1 * 2);
+			const svbool_t pN16_1 = svwhilelt_b16(0, active_c1);
+			const svbool_t pN32_1 = svwhilelt_b32((uint64_t) 0, (uint64_t) active_c1);
+			const svbool_t pNDim1 = svwhilelt_b32((uint64_t) col1, (uint64_t) N);
 
 			svzero_za();
 			for (size_t k = 0; k < K; k += 2) {
 				svfloat16_t a0 = svld1(pM16, &a_transposed[(k + 0) * M + row]);
 				svfloat16_t a1 = (k + 1 < K) ? svld1(pM16, &a_transposed[(k + 1) * M + row]) : svdup_n_f16(0);
-				svfloat16_t b0 = svld1(pN16, &b[(k + 0) * N + col]);
-				svfloat16_t b1 = (k + 1 < K) ? svld1(pN16, &b[(k + 1) * N + col]) : svdup_n_f16(0);
-				
-				svfloat16_t zL = svzip1_f16(a0, a1);
-				svfloat16_t zR = svzip1_f16(b0, b1);
-				svmopa_za32_f16_m(0, pMh, pNh, zL, zR);
+				svfloat16_t zA = svzip1_f16(a0, a1);
+
+				svfloat16_t b0_0 = svld1(pN16_0, &b[(k + 0) * N + col0]);
+				svfloat16_t b1_0 = (k + 1 < K) ? svld1(pN16_0, &b[(k + 1) * N + col0]) : svdup_n_f16(0);
+				svfloat16_t zB0 = svzip1_f16(b0_0, b1_0);
+
+				svmopa_za32_f16_m(0, pMh, pNh0, zA, zB0);
+
+				if (active_c1) {
+					svfloat16_t b0_1 = svld1(pN16_1, &b[(k + 0) * N + col1]);
+					svfloat16_t b1_1 = (k + 1 < K) ? svld1(pN16_1, &b[(k + 1) * N + col1]) : svdup_n_f16(0);
+					svfloat16_t zB1 = svzip1_f16(b0_1, b1_1);
+
+					svmopa_za32_f16_m(1, pMh, pNh1, zA, zB1);
+				}
 			}
 
-			for (size_t m = 0; m < active_rows; ++m) {
-				svbool_t p_lane = svpsel_lane_b32(pNDim, pMDim, row + m);
-				svst1_hor_za32(0, m, p_lane, tmp);
+			for (size_t m = 0; m < active_r; ++m) {
+				svbool_t p_lane0 = svpsel_lane_b32(pNDim0, pMDim, row + m);
+				svst1_hor_za32(0, m, p_lane0, tmp);
 				
-				svfloat32_t out32 = svld1(pN32, tmp);
-				svfloat16_t out16 = svcvt_f16_f32_z(pN32, out32);
+				svfloat32_t out32 = svld1(pN32_0, tmp);
+				svfloat16_t out16 = svcvt_f16_f32_z(pN32_0, out32);
 				out16 = svuzp1_f16(out16, out16);
+				svst1(pN16_0, &c[(row + m) * N + col0], out16);
 
-				svst1(pN16, &c[(row + m) * N + col], out16);
+				if (active_c1) {
+					svbool_t p_lane1 = svpsel_lane_b32(pNDim1, pMDim, row + m);
+					svst1_hor_za32(1, m, p_lane1, tmp);
+					
+					svfloat32_t out32 = svld1(pN32_1, tmp);
+					svfloat16_t out16 = svcvt_f16_f32_z(pN32_1, out32);
+					out16 = svuzp1_f16(out16, out16);
+					svst1(pN16_1, &c[(row + m) * N + col1], out16);
+				}
 			}
 		}
 	}
