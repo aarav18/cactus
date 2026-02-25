@@ -16,9 +16,15 @@ constexpr size_t SME2_K_UNROLL_CB2 = 2;
 constexpr size_t SME2_TILES_PER_THREAD = 4;
 }
 
+#if defined(__clang__)
+#define CACTUS_UNROLL4 _Pragma("clang loop unroll_count(4)")
+#else
+#define CACTUS_UNROLL4
+#endif
+
 static void cactus_pack_a_f16(
-    const __fp16* a,
-    __fp16* a_packed,
+    const __fp16* __restrict a,
+    __fp16* __restrict a_packed,
     size_t M,
     size_t K,
     size_t tile_rows,
@@ -40,12 +46,16 @@ static void cactus_pack_a_f16(
                 const size_t k0 = kp * 2;
                 const size_t k1 = k0 + 1;
                 __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
+                const __fp16* src_col = a + row0 * K + k0;
+                const bool has_k1 = (k1 < K);
 
+                CACTUS_UNROLL4
                 for (size_t r = 0; r < active_r; ++r) {
-                    const size_t src_row = row0 + r;
-                    dst[2 * r] = a[src_row * K + k0];
-                    dst[2 * r + 1] = (k1 < K) ? a[src_row * K + k1] : static_cast<__fp16>(0);
+                    dst[2 * r] = src_col[0];
+                    dst[2 * r + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                    src_col += K;
                 }
+                CACTUS_UNROLL4
                 for (size_t r = active_r; r < tile_rows; ++r) {
                     dst[2 * r] = static_cast<__fp16>(0);
                     dst[2 * r + 1] = static_cast<__fp16>(0);
@@ -55,8 +65,8 @@ static void cactus_pack_a_f16(
 }
 
 static void cactus_pack_b_f16_from_bt(
-    const __fp16* b_transposed,
-    __fp16* b_packed,
+    const __fp16* __restrict b_transposed,
+    __fp16* __restrict b_packed,
     size_t K,
     size_t N,
     size_t tile_cols,
@@ -89,10 +99,13 @@ static void cactus_pack_b_f16_from_bt(
                 for (size_t t = 0; t < 4; ++t) {
                     __fp16* dst_t = dst + t * tile_pairs;
                     const size_t col_t = col0 + t * tile_cols;
+                    const __fp16* src_col = b_transposed + col_t * K + k0;
+                    const bool has_k1 = (k1 < K);
+                    CACTUS_UNROLL4
                     for (size_t c = 0; c < tile_cols; ++c) {
-                        const size_t n = col_t + c;
-                        dst_t[2 * c] = b_transposed[n * K + k0];
-                        dst_t[2 * c + 1] = (k1 < K) ? b_transposed[n * K + k1] : static_cast<__fp16>(0);
+                        dst_t[2 * c] = src_col[0];
+                        dst_t[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                        src_col += K;
                     }
                 }
             }
@@ -112,10 +125,13 @@ static void cactus_pack_b_f16_from_bt(
                 for (size_t t = 0; t < 2; ++t) {
                     __fp16* dst_t = dst + t * tile_pairs;
                     const size_t col_t = col0 + t * tile_cols;
+                    const __fp16* src_col = b_transposed + col_t * K + k0;
+                    const bool has_k1 = (k1 < K);
+                    CACTUS_UNROLL4
                     for (size_t c = 0; c < tile_cols; ++c) {
-                        const size_t n = col_t + c;
-                        dst_t[2 * c] = b_transposed[n * K + k0];
-                        dst_t[2 * c + 1] = (k1 < K) ? b_transposed[n * K + k1] : static_cast<__fp16>(0);
+                        dst_t[2 * c] = src_col[0];
+                        dst_t[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                        src_col += K;
                     }
                 }
             }
@@ -134,12 +150,16 @@ static void cactus_pack_b_f16_from_bt(
                 const size_t k0 = kp * 2;
                 const size_t k1 = k0 + 1;
                 __fp16* dst = b_packed + off_cb1 + (g1 * k_pairs + kp) * tile_pairs;
+                const __fp16* src_col = b_transposed + col0 * K + k0;
+                const bool has_k1 = (k1 < K);
 
+                CACTUS_UNROLL4
                 for (size_t c = 0; c < active_c; ++c) {
-                    const size_t n = col0 + c;
-                    dst[2 * c] = b_transposed[n * K + k0];
-                    dst[2 * c + 1] = (k1 < K) ? b_transposed[n * K + k1] : static_cast<__fp16>(0);
+                    dst[2 * c] = src_col[0];
+                    dst[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                    src_col += K;
                 }
+                CACTUS_UNROLL4
                 for (size_t c = active_c; c < tile_cols; ++c) {
                     dst[2 * c] = static_cast<__fp16>(0);
                     dst[2 * c + 1] = static_cast<__fp16>(0);
@@ -588,3 +608,5 @@ void cactus_matmul_f16_sme2_caller(
             );
         });
 }
+
+#undef CACTUS_UNROLL4
