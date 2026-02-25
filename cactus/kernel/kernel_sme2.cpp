@@ -28,14 +28,12 @@ static void cactus_pack_a_f16(
             for (size_t idx = start; idx < end; ++idx) {
                 const size_t rb = idx / k_pairs;
                 const size_t kp = idx % k_pairs;
-
                 const size_t row0 = rb * tile_rows;
                 const size_t active_r = (row0 < M) ? std::min(tile_rows, M - row0) : 0;
                 if (active_r == 0) continue;
 
                 const size_t k0 = kp * 2;
                 const size_t k1 = k0 + 1;
-
                 __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
 
                 for (size_t r = 0; r < active_r; ++r) {
@@ -65,14 +63,12 @@ static void cactus_pack_b_f16_from_bt(
             for (size_t idx = start; idx < end; ++idx) {
                 const size_t kp = idx / col_blocks;
                 const size_t cb = idx % col_blocks;
-
                 const size_t col0 = cb * tile_cols;
                 const size_t active_c = (col0 < N) ? std::min(tile_cols, N - col0) : 0;
                 if (active_c == 0) continue;
 
                 const size_t k0 = kp * 2;
                 const size_t k1 = k0 + 1;
-
                 __fp16* dst = b_packed + (kp * col_blocks + cb) * tile_pairs;
 
                 for (size_t c = 0; c < active_c; ++c) {
@@ -94,26 +90,34 @@ static void cactus_matmul_f16_sme2_worker(
     size_t start_row,
     size_t end_row,
     size_t tile_rows,
-    size_t tile_pairs,
-    float* tmp_pair
+    size_t tile_pairs
 ) __arm_streaming __arm_inout("za") {
     if (start_row >= end_row) return;
     (void)M;
 
     const size_t k_pairs = (K + 1) / 2;
     const size_t col_blocks = (N + tile_rows - 1) / tile_rows;
-
     const size_t a_row_block_stride = k_pairs * tile_pairs;
 
+    const svcount_t pNh_full_c = svptrue_c16();
     const svbool_t pNh_full = svptrue_b16();
     const svbool_t pN32_full = svwhilelt_b32(static_cast<uint64_t>(0), static_cast<uint64_t>(tile_rows));
-    const svcount_t pNh_full_c = svptrue_c16();
     const svcount_t pOut16_full_c = svwhilelt_c16(static_cast<uint64_t>(0), static_cast<uint64_t>(tile_rows), 2);
+    const svfloat32_t z0_f32 = svdup_n_f32(0.0f);
+#define CACTUS_STORE_FULL_TILE_ROW(dst_idx, out32_vec)                                   \
+    do {                                                                                  \
+        svfloat16_t out16_local = svcvt_f16_f32_z(pN32_full, (out32_vec));               \
+        out16_local = svuzp1_f16(out16_local, out16_local);                              \
+        svst1_f16_x2(pOut16_full_c, &c[(dst_idx)], svcreate2(out16_local, out16_local)); \
+    } while (0)
 
     for (size_t row = start_row; row < end_row; row += tile_rows) {
         const size_t rb = row / tile_rows;
         const size_t active_r = std::min(tile_rows, end_row - row);
-        const svbool_t pMh = svwhilelt_b16(static_cast<uint64_t>(0), static_cast<uint64_t>(active_r * 2));
+        const bool full_r = (active_r == tile_rows);
+        const svbool_t pMh = full_r
+            ? svptrue_b16()
+            : svwhilelt_b16(static_cast<uint64_t>(0), static_cast<uint64_t>(active_r * 2));
 
         size_t cb = 0;
 
@@ -121,6 +125,45 @@ static void cactus_matmul_f16_sme2_worker(
             svzero_za();
 
             size_t kp = 0;
+            for (; kp + 3 < k_pairs; kp += 4) {
+                const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
+                const __fp16* b_ptr0 = b_packed + (kp * col_blocks + cb) * tile_pairs;
+                const __fp16* a_ptr1 = a_ptr0 + tile_pairs;
+                const __fp16* b_ptr1 = b_ptr0 + col_blocks * tile_pairs;
+                const __fp16* a_ptr2 = a_ptr1 + tile_pairs;
+                const __fp16* b_ptr2 = b_ptr1 + col_blocks * tile_pairs;
+                const __fp16* a_ptr3 = a_ptr2 + tile_pairs;
+                const __fp16* b_ptr3 = b_ptr2 + col_blocks * tile_pairs;
+
+                const svfloat16_t zA0 = svld1(pMh, a_ptr0);
+                const svfloat16x4_t zB40 = svld1_f16_x4(pNh_full_c, b_ptr0);
+                svmopa_za32_f16_m(0, pMh, pNh_full, zA0, svget4(zB40, 0));
+                svmopa_za32_f16_m(1, pMh, pNh_full, zA0, svget4(zB40, 1));
+                svmopa_za32_f16_m(2, pMh, pNh_full, zA0, svget4(zB40, 2));
+                svmopa_za32_f16_m(3, pMh, pNh_full, zA0, svget4(zB40, 3));
+
+                const svfloat16_t zA1 = svld1(pMh, a_ptr1);
+                const svfloat16x4_t zB41 = svld1_f16_x4(pNh_full_c, b_ptr1);
+                svmopa_za32_f16_m(0, pMh, pNh_full, zA1, svget4(zB41, 0));
+                svmopa_za32_f16_m(1, pMh, pNh_full, zA1, svget4(zB41, 1));
+                svmopa_za32_f16_m(2, pMh, pNh_full, zA1, svget4(zB41, 2));
+                svmopa_za32_f16_m(3, pMh, pNh_full, zA1, svget4(zB41, 3));
+
+                const svfloat16_t zA2 = svld1(pMh, a_ptr2);
+                const svfloat16x4_t zB42 = svld1_f16_x4(pNh_full_c, b_ptr2);
+                svmopa_za32_f16_m(0, pMh, pNh_full, zA2, svget4(zB42, 0));
+                svmopa_za32_f16_m(1, pMh, pNh_full, zA2, svget4(zB42, 1));
+                svmopa_za32_f16_m(2, pMh, pNh_full, zA2, svget4(zB42, 2));
+                svmopa_za32_f16_m(3, pMh, pNh_full, zA2, svget4(zB42, 3));
+
+                const svfloat16_t zA3 = svld1(pMh, a_ptr3);
+                const svfloat16x4_t zB43 = svld1_f16_x4(pNh_full_c, b_ptr3);
+                svmopa_za32_f16_m(0, pMh, pNh_full, zA3, svget4(zB43, 0));
+                svmopa_za32_f16_m(1, pMh, pNh_full, zA3, svget4(zB43, 1));
+                svmopa_za32_f16_m(2, pMh, pNh_full, zA3, svget4(zB43, 2));
+                svmopa_za32_f16_m(3, pMh, pNh_full, zA3, svget4(zB43, 3));
+            }
+
             for (; kp + 1 < k_pairs; kp += 2) {
                 const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
                 const __fp16* b_ptr0 = b_packed + (kp * col_blocks + cb) * tile_pairs;
@@ -155,86 +198,84 @@ static void cactus_matmul_f16_sme2_worker(
             }
 
             const size_t col = cb * tile_rows;
-
-            size_t trow = 0;
-            for (; trow + 3 < active_r; trow += 4) {
-                for (size_t u = 0; u < 4; ++u) {
-                    const size_t tr = trow + u;
-
-                    svst1_hor_za32(0, static_cast<uint32_t>(tr), pN32_full, tmp_pair);
-                    svst1_hor_za32(1, static_cast<uint32_t>(tr), pN32_full, tmp_pair + tile_rows);
-                    svfloat32_t out0_32 = svld1(pN32_full, tmp_pair);
-                    svfloat32_t out1_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                    svfloat16_t out0 = svcvt_f16_f32_z(pN32_full, out0_32);
-                    svfloat16_t out1 = svcvt_f16_f32_z(pN32_full, out1_32);
-                    out0 = svuzp1_f16(out0, out0);
-                    out1 = svuzp1_f16(out1, out1);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col], svcreate2(out0, out0));
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + tile_rows], svcreate2(out1, out1));
-
-                    svst1_hor_za32(2, static_cast<uint32_t>(tr), pN32_full, tmp_pair);
-                    svst1_hor_za32(3, static_cast<uint32_t>(tr), pN32_full, tmp_pair + tile_rows);
-                    svfloat32_t out2_32 = svld1(pN32_full, tmp_pair);
-                    svfloat32_t out3_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                    svfloat16_t out2 = svcvt_f16_f32_z(pN32_full, out2_32);
-                    svfloat16_t out3 = svcvt_f16_f32_z(pN32_full, out3_32);
-                    out2 = svuzp1_f16(out2, out2);
-                    out3 = svuzp1_f16(out3, out3);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + 2 * tile_rows], svcreate2(out2, out2));
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + 3 * tile_rows], svcreate2(out3, out3));
+            if (full_r) {
+                for (size_t trow = 0; trow < tile_rows; trow += 4) {
+                    const svfloat32x4_t zT0 = svread_hor_za32_f32_vg4(0, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT1 = svread_hor_za32_f32_vg4(1, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT2 = svread_hor_za32_f32_vg4(2, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT3 = svread_hor_za32_f32_vg4(3, static_cast<uint32_t>(trow));
+                    const size_t dst0 = (row + trow + 0) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst0, svget4(zT0, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + tile_rows, svget4(zT1, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + 2 * tile_rows, svget4(zT2, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + 3 * tile_rows, svget4(zT3, 0));
+                    const size_t dst1 = (row + trow + 1) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst1, svget4(zT0, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + tile_rows, svget4(zT1, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + 2 * tile_rows, svget4(zT2, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + 3 * tile_rows, svget4(zT3, 1));
+                    const size_t dst2 = (row + trow + 2) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst2, svget4(zT0, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + tile_rows, svget4(zT1, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + 2 * tile_rows, svget4(zT2, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + 3 * tile_rows, svget4(zT3, 2));
+                    const size_t dst3 = (row + trow + 3) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst3, svget4(zT0, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + tile_rows, svget4(zT1, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + 2 * tile_rows, svget4(zT2, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + 3 * tile_rows, svget4(zT3, 3));
                 }
-            }
-
-            for (; trow + 1 < active_r; trow += 2) {
-                for (size_t u = 0; u < 2; ++u) {
-                    const size_t tr = trow + u;
-
-                    svst1_hor_za32(0, static_cast<uint32_t>(tr), pN32_full, tmp_pair);
-                    svst1_hor_za32(1, static_cast<uint32_t>(tr), pN32_full, tmp_pair + tile_rows);
-                    svfloat32_t out0_32 = svld1(pN32_full, tmp_pair);
-                    svfloat32_t out1_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                    svfloat16_t out0 = svcvt_f16_f32_z(pN32_full, out0_32);
-                    svfloat16_t out1 = svcvt_f16_f32_z(pN32_full, out1_32);
-                    out0 = svuzp1_f16(out0, out0);
-                    out1 = svuzp1_f16(out1, out1);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col], svcreate2(out0, out0));
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + tile_rows], svcreate2(out1, out1));
-
-                    svst1_hor_za32(2, static_cast<uint32_t>(tr), pN32_full, tmp_pair);
-                    svst1_hor_za32(3, static_cast<uint32_t>(tr), pN32_full, tmp_pair + tile_rows);
-                    svfloat32_t out2_32 = svld1(pN32_full, tmp_pair);
-                    svfloat32_t out3_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                    svfloat16_t out2 = svcvt_f16_f32_z(pN32_full, out2_32);
-                    svfloat16_t out3 = svcvt_f16_f32_z(pN32_full, out3_32);
-                    out2 = svuzp1_f16(out2, out2);
-                    out3 = svuzp1_f16(out3, out3);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + 2 * tile_rows], svcreate2(out2, out2));
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + 3 * tile_rows], svcreate2(out3, out3));
+            } else {
+                size_t trow = 0;
+                for (; trow + 3 < active_r; trow += 4) {
+                    const svfloat32x4_t zT0 = svread_hor_za32_f32_vg4(0, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT1 = svread_hor_za32_f32_vg4(1, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT2 = svread_hor_za32_f32_vg4(2, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT3 = svread_hor_za32_f32_vg4(3, static_cast<uint32_t>(trow));
+                    const size_t dst0 = (row + trow + 0) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst0, svget4(zT0, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + tile_rows, svget4(zT1, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + 2 * tile_rows, svget4(zT2, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + 3 * tile_rows, svget4(zT3, 0));
+                    const size_t dst1 = (row + trow + 1) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst1, svget4(zT0, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + tile_rows, svget4(zT1, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + 2 * tile_rows, svget4(zT2, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + 3 * tile_rows, svget4(zT3, 1));
+                    const size_t dst2 = (row + trow + 2) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst2, svget4(zT0, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + tile_rows, svget4(zT1, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + 2 * tile_rows, svget4(zT2, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + 3 * tile_rows, svget4(zT3, 2));
+                    const size_t dst3 = (row + trow + 3) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst3, svget4(zT0, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + tile_rows, svget4(zT1, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + 2 * tile_rows, svget4(zT2, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + 3 * tile_rows, svget4(zT3, 3));
                 }
-            }
-
-            for (; trow < active_r; ++trow) {
-                svst1_hor_za32(0, static_cast<uint32_t>(trow), pN32_full, tmp_pair);
-                svst1_hor_za32(1, static_cast<uint32_t>(trow), pN32_full, tmp_pair + tile_rows);
-                svfloat32_t out0_32 = svld1(pN32_full, tmp_pair);
-                svfloat32_t out1_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                svfloat16_t out0 = svcvt_f16_f32_z(pN32_full, out0_32);
-                svfloat16_t out1 = svcvt_f16_f32_z(pN32_full, out1_32);
-                out0 = svuzp1_f16(out0, out0);
-                out1 = svuzp1_f16(out1, out1);
-                svst1_f16_x2(pOut16_full_c, &c[(row + trow) * N + col], svcreate2(out0, out0));
-                svst1_f16_x2(pOut16_full_c, &c[(row + trow) * N + col + tile_rows], svcreate2(out1, out1));
-
-                svst1_hor_za32(2, static_cast<uint32_t>(trow), pN32_full, tmp_pair);
-                svst1_hor_za32(3, static_cast<uint32_t>(trow), pN32_full, tmp_pair + tile_rows);
-                svfloat32_t out2_32 = svld1(pN32_full, tmp_pair);
-                svfloat32_t out3_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                svfloat16_t out2 = svcvt_f16_f32_z(pN32_full, out2_32);
-                svfloat16_t out3 = svcvt_f16_f32_z(pN32_full, out3_32);
-                out2 = svuzp1_f16(out2, out2);
-                out3 = svuzp1_f16(out3, out3);
-                svst1_f16_x2(pOut16_full_c, &c[(row + trow) * N + col + 2 * tile_rows], svcreate2(out2, out2));
-                svst1_f16_x2(pOut16_full_c, &c[(row + trow) * N + col + 3 * tile_rows], svcreate2(out3, out3));
+                for (; trow + 1 < active_r; trow += 2) {
+                    const svfloat32x2_t zT0 = svread_hor_za32_f32_vg2(0, static_cast<uint32_t>(trow));
+                    const svfloat32x2_t zT1 = svread_hor_za32_f32_vg2(1, static_cast<uint32_t>(trow));
+                    const svfloat32x2_t zT2 = svread_hor_za32_f32_vg2(2, static_cast<uint32_t>(trow));
+                    const svfloat32x2_t zT3 = svread_hor_za32_f32_vg2(3, static_cast<uint32_t>(trow));
+                    const size_t dst0 = (row + trow + 0) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst0, svget2(zT0, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + tile_rows, svget2(zT1, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + 2 * tile_rows, svget2(zT2, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + 3 * tile_rows, svget2(zT3, 0));
+                    const size_t dst1 = (row + trow + 1) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst1, svget2(zT0, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + tile_rows, svget2(zT1, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + 2 * tile_rows, svget2(zT2, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + 3 * tile_rows, svget2(zT3, 1));
+                }
+                for (; trow < active_r; ++trow) {
+                    const size_t dst = (row + trow) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst, svread_hor_za32_f32_m(z0_f32, pN32_full, 0, static_cast<uint32_t>(trow)));
+                    CACTUS_STORE_FULL_TILE_ROW(dst + tile_rows, svread_hor_za32_f32_m(z0_f32, pN32_full, 1, static_cast<uint32_t>(trow)));
+                    CACTUS_STORE_FULL_TILE_ROW(dst + 2 * tile_rows, svread_hor_za32_f32_m(z0_f32, pN32_full, 2, static_cast<uint32_t>(trow)));
+                    CACTUS_STORE_FULL_TILE_ROW(dst + 3 * tile_rows, svread_hor_za32_f32_m(z0_f32, pN32_full, 3, static_cast<uint32_t>(trow)));
+                }
             }
         }
 
@@ -270,60 +311,56 @@ static void cactus_matmul_f16_sme2_worker(
             }
 
             const size_t col = cb * tile_rows;
-
-            size_t trow = 0;
-            for (; trow + 3 < active_r; trow += 4) {
-                for (size_t u = 0; u < 4; ++u) {
-                    const size_t tr = trow + u;
-                    svst1_hor_za32(0, static_cast<uint32_t>(tr), pN32_full, tmp_pair);
-                    svst1_hor_za32(1, static_cast<uint32_t>(tr), pN32_full, tmp_pair + tile_rows);
-
-                    svfloat32_t out0_32 = svld1(pN32_full, tmp_pair);
-                    svfloat32_t out1_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                    svfloat16_t out0 = svcvt_f16_f32_z(pN32_full, out0_32);
-                    svfloat16_t out1 = svcvt_f16_f32_z(pN32_full, out1_32);
-                    out0 = svuzp1_f16(out0, out0);
-                    out1 = svuzp1_f16(out1, out1);
-                    svfloat16x2_t out_pair0 = svcreate2(out0, out0);
-                    svfloat16x2_t out_pair1 = svcreate2(out1, out1);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col], out_pair0);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + tile_rows], out_pair1);
+            if (full_r) {
+                for (size_t trow = 0; trow < tile_rows; trow += 4) {
+                    const svfloat32x4_t zT0 = svread_hor_za32_f32_vg4(0, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT1 = svread_hor_za32_f32_vg4(1, static_cast<uint32_t>(trow));
+                    const size_t dst0 = (row + trow + 0) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst0, svget4(zT0, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + tile_rows, svget4(zT1, 0));
+                    const size_t dst1 = (row + trow + 1) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst1, svget4(zT0, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + tile_rows, svget4(zT1, 1));
+                    const size_t dst2 = (row + trow + 2) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst2, svget4(zT0, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + tile_rows, svget4(zT1, 2));
+                    const size_t dst3 = (row + trow + 3) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst3, svget4(zT0, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + tile_rows, svget4(zT1, 3));
                 }
-            }
-
-            for (; trow + 1 < active_r; trow += 2) {
-                for (size_t u = 0; u < 2; ++u) {
-                    const size_t tr = trow + u;
-                    svst1_hor_za32(0, static_cast<uint32_t>(tr), pN32_full, tmp_pair);
-                    svst1_hor_za32(1, static_cast<uint32_t>(tr), pN32_full, tmp_pair + tile_rows);
-
-                    svfloat32_t out0_32 = svld1(pN32_full, tmp_pair);
-                    svfloat32_t out1_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                    svfloat16_t out0 = svcvt_f16_f32_z(pN32_full, out0_32);
-                    svfloat16_t out1 = svcvt_f16_f32_z(pN32_full, out1_32);
-                    out0 = svuzp1_f16(out0, out0);
-                    out1 = svuzp1_f16(out1, out1);
-                    svfloat16x2_t out_pair0 = svcreate2(out0, out0);
-                    svfloat16x2_t out_pair1 = svcreate2(out1, out1);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col], out_pair0);
-                    svst1_f16_x2(pOut16_full_c, &c[(row + tr) * N + col + tile_rows], out_pair1);
+            } else {
+                size_t trow = 0;
+                for (; trow + 3 < active_r; trow += 4) {
+                    const svfloat32x4_t zT0 = svread_hor_za32_f32_vg4(0, static_cast<uint32_t>(trow));
+                    const svfloat32x4_t zT1 = svread_hor_za32_f32_vg4(1, static_cast<uint32_t>(trow));
+                    const size_t dst0 = (row + trow + 0) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst0, svget4(zT0, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + tile_rows, svget4(zT1, 0));
+                    const size_t dst1 = (row + trow + 1) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst1, svget4(zT0, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + tile_rows, svget4(zT1, 1));
+                    const size_t dst2 = (row + trow + 2) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst2, svget4(zT0, 2));
+                    CACTUS_STORE_FULL_TILE_ROW(dst2 + tile_rows, svget4(zT1, 2));
+                    const size_t dst3 = (row + trow + 3) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst3, svget4(zT0, 3));
+                    CACTUS_STORE_FULL_TILE_ROW(dst3 + tile_rows, svget4(zT1, 3));
                 }
-            }
-
-            for (; trow < active_r; ++trow) {
-                svst1_hor_za32(0, static_cast<uint32_t>(trow), pN32_full, tmp_pair);
-                svst1_hor_za32(1, static_cast<uint32_t>(trow), pN32_full, tmp_pair + tile_rows);
-
-                svfloat32_t out0_32 = svld1(pN32_full, tmp_pair);
-                svfloat32_t out1_32 = svld1(pN32_full, tmp_pair + tile_rows);
-                svfloat16_t out0 = svcvt_f16_f32_z(pN32_full, out0_32);
-                svfloat16_t out1 = svcvt_f16_f32_z(pN32_full, out1_32);
-                out0 = svuzp1_f16(out0, out0);
-                out1 = svuzp1_f16(out1, out1);
-                svfloat16x2_t out_pair0 = svcreate2(out0, out0);
-                svfloat16x2_t out_pair1 = svcreate2(out1, out1);
-                svst1_f16_x2(pOut16_full_c, &c[(row + trow) * N + col], out_pair0);
-                svst1_f16_x2(pOut16_full_c, &c[(row + trow) * N + col + tile_rows], out_pair1);
+                for (; trow + 1 < active_r; trow += 2) {
+                    const svfloat32x2_t zT0 = svread_hor_za32_f32_vg2(0, static_cast<uint32_t>(trow));
+                    const svfloat32x2_t zT1 = svread_hor_za32_f32_vg2(1, static_cast<uint32_t>(trow));
+                    const size_t dst0 = (row + trow + 0) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst0, svget2(zT0, 0));
+                    CACTUS_STORE_FULL_TILE_ROW(dst0 + tile_rows, svget2(zT1, 0));
+                    const size_t dst1 = (row + trow + 1) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst1, svget2(zT0, 1));
+                    CACTUS_STORE_FULL_TILE_ROW(dst1 + tile_rows, svget2(zT1, 1));
+                }
+                for (; trow < active_r; ++trow) {
+                    const size_t dst = (row + trow) * N + col;
+                    CACTUS_STORE_FULL_TILE_ROW(dst, svread_hor_za32_f32_m(z0_f32, pN32_full, 0, static_cast<uint32_t>(trow)));
+                    CACTUS_STORE_FULL_TILE_ROW(dst + tile_rows, svread_hor_za32_f32_m(z0_f32, pN32_full, 1, static_cast<uint32_t>(trow)));
+                }
             }
         }
 
@@ -361,38 +398,15 @@ static void cactus_matmul_f16_sme2_worker(
                 svmopa_za32_f16_m(0, pMh, pNh, zA, zB);
             }
 
-            size_t trow = 0;
-            for (; trow + 3 < active_r; trow += 4) {
-                for (size_t u = 0; u < 4; ++u) {
-                    const size_t tr = trow + u;
-                    svst1_hor_za32(0, static_cast<uint32_t>(tr), pN32, tmp_pair);
-                    svfloat32_t out32 = svld1(pN32, tmp_pair);
-                    svfloat16_t out16 = svcvt_f16_f32_z(pN32, out32);
-                    out16 = svuzp1_f16(out16, out16);
-                    svst1(pOut16, &c[(row + tr) * N + col], out16);
-                }
-            }
-
-            for (; trow + 1 < active_r; trow += 2) {
-                for (size_t u = 0; u < 2; ++u) {
-                    const size_t tr = trow + u;
-                    svst1_hor_za32(0, static_cast<uint32_t>(tr), pN32, tmp_pair);
-                    svfloat32_t out32 = svld1(pN32, tmp_pair);
-                    svfloat16_t out16 = svcvt_f16_f32_z(pN32, out32);
-                    out16 = svuzp1_f16(out16, out16);
-                    svst1(pOut16, &c[(row + tr) * N + col], out16);
-                }
-            }
-
-            for (; trow < active_r; ++trow) {
-                svst1_hor_za32(0, static_cast<uint32_t>(trow), pN32, tmp_pair);
-                svfloat32_t out32 = svld1(pN32, tmp_pair);
+            for (size_t trow = 0; trow < active_r; ++trow) {
+                svfloat32_t out32 = svread_hor_za32_f32_m(z0_f32, pN32, 0, static_cast<uint32_t>(trow));
                 svfloat16_t out16 = svcvt_f16_f32_z(pN32, out32);
                 out16 = svuzp1_f16(out16, out16);
                 svst1(pOut16, &c[(row + trow) * N + col], out16);
             }
         }
     }
+#undef CACTUS_STORE_FULL_TILE_ROW
 }
 
 __arm_new("za") __arm_locally_streaming
@@ -409,7 +423,6 @@ static void cactus_matmul_f16_sme2_thread_entry(
 ) {
     const size_t tile_rows = svcntsw();
     const size_t tile_pairs = svcnth();
-    std::vector<float> tmp_pair(2 * tile_rows, 0.0f);
 
     for (size_t block_idx = start_block; block_idx < end_block; ++block_idx) {
         const size_t start_row = block_idx * row_block_size;
@@ -425,8 +438,7 @@ static void cactus_matmul_f16_sme2_thread_entry(
             start_row,
             end_row,
             tile_rows,
-            tile_pairs,
-            tmp_pair.data()
+            tile_pairs
         );
     }
 }
@@ -453,8 +465,7 @@ void cactus_matmul_f16_sme2_caller(
     cactus_pack_a_f16(a, a_packed.data(), M, K, tile_rows, tile_pairs);
     cactus_pack_b_f16_from_bt(b_transposed, b_packed.data(), K, N, tile_rows, tile_pairs);
 
-    constexpr size_t TILES_PER_THREAD = 2;
-    const size_t row_block_size = TILES_PER_THREAD * tile_rows;
+    const size_t row_block_size = tile_rows;
     const size_t num_row_blocks = (M + row_block_size - 1) / row_block_size;
 
     CactusThreading::parallel_for(num_row_blocks, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
