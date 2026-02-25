@@ -8,11 +8,11 @@
 #include "kernel_utils.h"
 #include <arm_sme.h>
 #include <algorithm>
+#include <atomic>
 #include <memory>
 
 namespace {
 constexpr size_t SME2_TILES_PER_THREAD = 3;
-constexpr CactusThreading::ParallelConfig SME2_CALLER_PAR_CONFIG = CactusThreading::ParallelConfig{16, 2};
 }
 
 #if defined(__clang__)
@@ -21,72 +21,46 @@ constexpr CactusThreading::ParallelConfig SME2_CALLER_PAR_CONFIG = CactusThreadi
 #define CACTUS_UNROLL4
 #endif
 
-static void cactus_pack_a_f16(
+static inline void cactus_pack_a_f16_row_block(
     const __fp16* __restrict a,
     __fp16* __restrict a_packed,
-    size_t M,
     size_t K,
+    size_t rb,
+    size_t row0,
+    size_t active_r,
     size_t tile_rows,
-    size_t tile_pairs
+    size_t tile_pairs,
+    size_t k_pairs
 ) {
-    const size_t row_blocks = (M + tile_rows - 1) / tile_rows;
-    const size_t k_pairs = (K + 1) / 2;
     const size_t block_stride = k_pairs * tile_pairs;
+    const bool even_k = ((K & 1u) == 0);
+    for (size_t kp = 0; kp < k_pairs; ++kp) {
+        const size_t k0 = kp * 2;
+        const size_t k1 = k0 + 1;
+        __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
+        const __fp16* src_col = a + row0 * K + k0;
 
-    if ((K & 1u) == 0) {
-        CactusThreading::parallel_for(row_blocks * k_pairs, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
-            [=](size_t start, size_t end) {
-                for (size_t idx = start; idx < end; ++idx) {
-                    const size_t rb = idx / k_pairs;
-                    const size_t kp = idx % k_pairs;
-                    const size_t row0 = rb * tile_rows;
-                    const size_t active_r = (row0 < M) ? std::min(tile_rows, M - row0) : 0;
-
-                    const size_t k0 = kp * 2;
-                    __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
-                    const __fp16* src_col = a + row0 * K + k0;
-
-                    CACTUS_UNROLL4
-                    for (size_t r = 0; r < active_r; ++r) {
-                        dst[2 * r] = src_col[0];
-                        dst[2 * r + 1] = src_col[1];
-                        src_col += K;
-                    }
-                    CACTUS_UNROLL4
-                    for (size_t r = active_r; r < tile_rows; ++r) {
-                        dst[2 * r] = static_cast<__fp16>(0);
-                        dst[2 * r + 1] = static_cast<__fp16>(0);
-                    }
-                }
-            });
-    } else {
-        CactusThreading::parallel_for(row_blocks * k_pairs, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
-            [=](size_t start, size_t end) {
-                for (size_t idx = start; idx < end; ++idx) {
-                    const size_t rb = idx / k_pairs;
-                    const size_t kp = idx % k_pairs;
-                    const size_t row0 = rb * tile_rows;
-                    const size_t active_r = (row0 < M) ? std::min(tile_rows, M - row0) : 0;
-
-                    const size_t k0 = kp * 2;
-                    const size_t k1 = k0 + 1;
-                    __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
-                    const __fp16* src_col = a + row0 * K + k0;
-                    const bool has_k1 = (k1 < K);
-
-                    CACTUS_UNROLL4
-                    for (size_t r = 0; r < active_r; ++r) {
-                        dst[2 * r] = src_col[0];
-                        dst[2 * r + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
-                        src_col += K;
-                    }
-                    CACTUS_UNROLL4
-                    for (size_t r = active_r; r < tile_rows; ++r) {
-                        dst[2 * r] = static_cast<__fp16>(0);
-                        dst[2 * r + 1] = static_cast<__fp16>(0);
-                    }
-                }
-            });
+        if (even_k) {
+            CACTUS_UNROLL4
+            for (size_t r = 0; r < active_r; ++r) {
+                dst[2 * r] = src_col[0];
+                dst[2 * r + 1] = src_col[1];
+                src_col += K;
+            }
+        } else {
+            const bool has_k1 = (k1 < K);
+            CACTUS_UNROLL4
+            for (size_t r = 0; r < active_r; ++r) {
+                dst[2 * r] = src_col[0];
+                dst[2 * r + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                src_col += K;
+            }
+        }
+        CACTUS_UNROLL4
+        for (size_t r = active_r; r < tile_rows; ++r) {
+            dst[2 * r] = static_cast<__fp16>(0);
+            dst[2 * r + 1] = static_cast<__fp16>(0);
+        }
     }
 }
 
@@ -528,7 +502,8 @@ static void cactus_matmul_f16_sme2_worker(
 
 __arm_new("za") __arm_locally_streaming
 static void cactus_matmul_f16_sme2_thread_entry(
-    const __fp16* a_packed,
+    const __fp16* a,
+    __fp16* a_packed,
     const __fp16* b_packed,
     __fp16* c,
     size_t M,
@@ -540,10 +515,27 @@ static void cactus_matmul_f16_sme2_thread_entry(
 ) {
     const size_t tile_rows = svcntsw();
     const size_t tile_pairs = svcnth();
+    const size_t k_pairs = (K + 1) / 2;
 
     for (size_t block_idx = start_block; block_idx < end_block; ++block_idx) {
         const size_t start_row = block_idx * row_block_size;
         const size_t end_row = std::min(start_row + row_block_size, M);
+
+        for (size_t row = start_row; row < end_row; row += tile_rows) {
+            const size_t rb = row / tile_rows;
+            const size_t active_r = std::min(tile_rows, end_row - row);
+            cactus_pack_a_f16_row_block(
+                a,
+                a_packed,
+                K,
+                rb,
+                row,
+                active_r,
+                tile_rows,
+                tile_pairs,
+                k_pairs
+            );
+        }
 
         cactus_matmul_f16_sme2_worker(
             a_packed,
@@ -578,18 +570,39 @@ void cactus_matmul_f16_sme2_caller(
 
     std::unique_ptr<__fp16[]> a_packed(new __fp16[row_blocks * k_pairs * tile_pairs]);
     std::unique_ptr<__fp16[]> b_packed(new __fp16[k_pairs * col_blocks * tile_pairs]);
-    const __fp16* a_packed_ptr = a_packed.get();
+    __fp16* a_packed_ptr = a_packed.get();
     const __fp16* b_packed_ptr = b_packed.get();
 
-    cactus_pack_a_f16(a, a_packed.get(), M, K, tile_rows, tile_pairs);
     cactus_pack_b_f16_from_bt(b_transposed, b_packed.get(), K, N, tile_rows, tile_pairs);
 
     const size_t row_block_size = SME2_TILES_PER_THREAD * tile_rows;
     const size_t num_row_blocks = (M + row_block_size - 1) / row_block_size;
 
-    CactusThreading::parallel_for(num_row_blocks, SME2_CALLER_PAR_CONFIG,
-        [=](size_t start_block, size_t end_block) {
+    auto& pool = CactusThreading::get_thread_pool();
+    const size_t num_workers = std::min(pool.num_workers(), num_row_blocks);
+    if (num_workers <= 1) {
+        cactus_matmul_f16_sme2_thread_entry(
+            a,
+            a_packed_ptr,
+            b_packed_ptr,
+            c,
+            M,
+            K,
+            N,
+            row_block_size,
+            0,
+            num_row_blocks
+        );
+        return;
+    }
+
+    std::atomic<size_t> next_block{0};
+    pool.enqueue_n_threads(num_workers, num_workers, [&](size_t, size_t) {
+        while (true) {
+            const size_t block_idx = next_block.fetch_add(1, std::memory_order_relaxed);
+            if (block_idx >= num_row_blocks) break;
             cactus_matmul_f16_sme2_thread_entry(
+                a,
                 a_packed_ptr,
                 b_packed_ptr,
                 c,
@@ -597,10 +610,12 @@ void cactus_matmul_f16_sme2_caller(
                 K,
                 N,
                 row_block_size,
-                start_block,
-                end_block
+                block_idx,
+                block_idx + 1
             );
-        });
+        }
+    });
+    pool.wait_all();
 }
 
 #undef CACTUS_UNROLL4
