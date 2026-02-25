@@ -9,6 +9,12 @@
 #include <arm_sme.h>
 #include <algorithm>
 
+namespace {
+constexpr size_t SME2_K_UNROLL_CB4 = 8;
+constexpr size_t SME2_K_UNROLL_CB2 = 2;
+constexpr size_t SME2_TILES_PER_THREAD = 4;
+}
+
 static void cactus_pack_a_f16(
     const __fp16* a,
     __fp16* a_packed,
@@ -125,7 +131,23 @@ static void cactus_matmul_f16_sme2_worker(
             svzero_za();
 
             size_t kp = 0;
-            for (; kp + 3 < k_pairs; kp += 4) {
+            if constexpr (SME2_K_UNROLL_CB4 >= 8) {
+                for (; kp + 7 < k_pairs; kp += 8) {
+                    for (size_t u = 0; u < 8; ++u) {
+                        const __fp16* a_ptr = a_packed + rb * a_row_block_stride + (kp + u) * tile_pairs;
+                        const __fp16* b_ptr = b_packed + ((kp + u) * col_blocks + cb) * tile_pairs;
+                        const svfloat16_t zA = svld1(pMh, a_ptr);
+                        const svfloat16x4_t zB4 = svld1_f16_x4(pNh_full_c, b_ptr);
+                        svmopa_za32_f16_m(0, pMh, pNh_full, zA, svget4(zB4, 0));
+                        svmopa_za32_f16_m(1, pMh, pNh_full, zA, svget4(zB4, 1));
+                        svmopa_za32_f16_m(2, pMh, pNh_full, zA, svget4(zB4, 2));
+                        svmopa_za32_f16_m(3, pMh, pNh_full, zA, svget4(zB4, 3));
+                    }
+                }
+            }
+
+            if constexpr (SME2_K_UNROLL_CB4 >= 4) {
+                for (; kp + 3 < k_pairs; kp += 4) {
                 const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
                 const __fp16* b_ptr0 = b_packed + (kp * col_blocks + cb) * tile_pairs;
                 const __fp16* a_ptr1 = a_ptr0 + tile_pairs;
@@ -163,8 +185,10 @@ static void cactus_matmul_f16_sme2_worker(
                 svmopa_za32_f16_m(2, pMh, pNh_full, zA3, svget4(zB43, 2));
                 svmopa_za32_f16_m(3, pMh, pNh_full, zA3, svget4(zB43, 3));
             }
+            }
 
-            for (; kp + 1 < k_pairs; kp += 2) {
+            if constexpr (SME2_K_UNROLL_CB4 >= 2) {
+                for (; kp + 1 < k_pairs; kp += 2) {
                 const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
                 const __fp16* b_ptr0 = b_packed + (kp * col_blocks + cb) * tile_pairs;
                 const __fp16* a_ptr1 = a_ptr0 + tile_pairs;
@@ -183,6 +207,7 @@ static void cactus_matmul_f16_sme2_worker(
                 svmopa_za32_f16_m(1, pMh, pNh_full, zA1, svget4(zB41, 1));
                 svmopa_za32_f16_m(2, pMh, pNh_full, zA1, svget4(zB41, 2));
                 svmopa_za32_f16_m(3, pMh, pNh_full, zA1, svget4(zB41, 3));
+            }
             }
 
             for (; kp < k_pairs; ++kp) {
@@ -283,7 +308,8 @@ static void cactus_matmul_f16_sme2_worker(
             svzero_za();
 
             size_t kp = 0;
-            for (; kp + 1 < k_pairs; kp += 2) {
+            if constexpr (SME2_K_UNROLL_CB2 >= 2) {
+                for (; kp + 1 < k_pairs; kp += 2) {
                 const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
                 const __fp16* b_ptr0 = b_packed + (kp * col_blocks + cb) * tile_pairs;
                 const __fp16* a_ptr1 = a_ptr0 + tile_pairs;
@@ -298,6 +324,7 @@ static void cactus_matmul_f16_sme2_worker(
                 const svfloat16x2_t zB21 = svld1_f16_x2(pNh_full_c, b_ptr1);
                 svmopa_za32_f16_m(0, pMh, pNh_full, zA1, svget2(zB21, 0));
                 svmopa_za32_f16_m(1, pMh, pNh_full, zA1, svget2(zB21, 1));
+            }
             }
 
             for (; kp < k_pairs; ++kp) {
@@ -465,7 +492,7 @@ void cactus_matmul_f16_sme2_caller(
     cactus_pack_a_f16(a, a_packed.data(), M, K, tile_rows, tile_pairs);
     cactus_pack_b_f16_from_bt(b_transposed, b_packed.data(), K, N, tile_rows, tile_pairs);
 
-    const size_t row_block_size = tile_rows;
+    const size_t row_block_size = SME2_TILES_PER_THREAD * tile_rows;
     const size_t num_row_blocks = (M + row_block_size - 1) / row_block_size;
 
     CactusThreading::parallel_for(num_row_blocks, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
