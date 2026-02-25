@@ -11,9 +11,8 @@
 #include <memory>
 
 namespace {
-constexpr size_t SME2_K_UNROLL_CB4 = 8;
-constexpr size_t SME2_K_UNROLL_CB2 = 2;
-constexpr size_t SME2_TILES_PER_THREAD = 4;
+constexpr size_t SME2_TILES_PER_THREAD = 3;
+constexpr CactusThreading::ParallelConfig SME2_CALLER_PAR_CONFIG = CactusThreading::ParallelConfig{16, 2};
 }
 
 #if defined(__clang__)
@@ -34,34 +33,61 @@ static void cactus_pack_a_f16(
     const size_t k_pairs = (K + 1) / 2;
     const size_t block_stride = k_pairs * tile_pairs;
 
-    CactusThreading::parallel_for(row_blocks * k_pairs, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
-        [=](size_t start, size_t end) {
-            for (size_t idx = start; idx < end; ++idx) {
-                const size_t rb = idx / k_pairs;
-                const size_t kp = idx % k_pairs;
-                const size_t row0 = rb * tile_rows;
-                const size_t active_r = (row0 < M) ? std::min(tile_rows, M - row0) : 0;
-                if (active_r == 0) continue;
+    if ((K & 1u) == 0) {
+        CactusThreading::parallel_for(row_blocks * k_pairs, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
+            [=](size_t start, size_t end) {
+                for (size_t idx = start; idx < end; ++idx) {
+                    const size_t rb = idx / k_pairs;
+                    const size_t kp = idx % k_pairs;
+                    const size_t row0 = rb * tile_rows;
+                    const size_t active_r = (row0 < M) ? std::min(tile_rows, M - row0) : 0;
 
-                const size_t k0 = kp * 2;
-                const size_t k1 = k0 + 1;
-                __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
-                const __fp16* src_col = a + row0 * K + k0;
-                const bool has_k1 = (k1 < K);
+                    const size_t k0 = kp * 2;
+                    __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
+                    const __fp16* src_col = a + row0 * K + k0;
 
-                CACTUS_UNROLL4
-                for (size_t r = 0; r < active_r; ++r) {
-                    dst[2 * r] = src_col[0];
-                    dst[2 * r + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
-                    src_col += K;
+                    CACTUS_UNROLL4
+                    for (size_t r = 0; r < active_r; ++r) {
+                        dst[2 * r] = src_col[0];
+                        dst[2 * r + 1] = src_col[1];
+                        src_col += K;
+                    }
+                    CACTUS_UNROLL4
+                    for (size_t r = active_r; r < tile_rows; ++r) {
+                        dst[2 * r] = static_cast<__fp16>(0);
+                        dst[2 * r + 1] = static_cast<__fp16>(0);
+                    }
                 }
-                CACTUS_UNROLL4
-                for (size_t r = active_r; r < tile_rows; ++r) {
-                    dst[2 * r] = static_cast<__fp16>(0);
-                    dst[2 * r + 1] = static_cast<__fp16>(0);
+            });
+    } else {
+        CactusThreading::parallel_for(row_blocks * k_pairs, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
+            [=](size_t start, size_t end) {
+                for (size_t idx = start; idx < end; ++idx) {
+                    const size_t rb = idx / k_pairs;
+                    const size_t kp = idx % k_pairs;
+                    const size_t row0 = rb * tile_rows;
+                    const size_t active_r = (row0 < M) ? std::min(tile_rows, M - row0) : 0;
+
+                    const size_t k0 = kp * 2;
+                    const size_t k1 = k0 + 1;
+                    __fp16* dst = a_packed + rb * block_stride + kp * tile_pairs;
+                    const __fp16* src_col = a + row0 * K + k0;
+                    const bool has_k1 = (k1 < K);
+
+                    CACTUS_UNROLL4
+                    for (size_t r = 0; r < active_r; ++r) {
+                        dst[2 * r] = src_col[0];
+                        dst[2 * r + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                        src_col += K;
+                    }
+                    CACTUS_UNROLL4
+                    for (size_t r = active_r; r < tile_rows; ++r) {
+                        dst[2 * r] = static_cast<__fp16>(0);
+                        dst[2 * r + 1] = static_cast<__fp16>(0);
+                    }
                 }
-            }
-        });
+            });
+    }
 }
 
 static void cactus_pack_b_f16_from_bt(
@@ -85,6 +111,8 @@ static void cactus_pack_b_f16_from_bt(
     const size_t off_cb2 = off_cb4 + cb4_groups * k_pairs * 4 * tile_pairs;
     const size_t off_cb1 = off_cb2 + cb2_groups * k_pairs * 2 * tile_pairs;
 
+    const bool even_k = ((K & 1u) == 0);
+
     CactusThreading::parallel_for(cb4_groups * k_pairs, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
         [=](size_t start, size_t end) {
             for (size_t idx = start; idx < end; ++idx) {
@@ -100,12 +128,21 @@ static void cactus_pack_b_f16_from_bt(
                     __fp16* dst_t = dst + t * tile_pairs;
                     const size_t col_t = col0 + t * tile_cols;
                     const __fp16* src_col = b_transposed + col_t * K + k0;
-                    const bool has_k1 = (k1 < K);
-                    CACTUS_UNROLL4
-                    for (size_t c = 0; c < tile_cols; ++c) {
-                        dst_t[2 * c] = src_col[0];
-                        dst_t[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
-                        src_col += K;
+                    if (even_k) {
+                        CACTUS_UNROLL4
+                        for (size_t c = 0; c < tile_cols; ++c) {
+                            dst_t[2 * c] = src_col[0];
+                            dst_t[2 * c + 1] = src_col[1];
+                            src_col += K;
+                        }
+                    } else {
+                        const bool has_k1 = (k1 < K);
+                        CACTUS_UNROLL4
+                        for (size_t c = 0; c < tile_cols; ++c) {
+                            dst_t[2 * c] = src_col[0];
+                            dst_t[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                            src_col += K;
+                        }
                     }
                 }
             }
@@ -126,12 +163,21 @@ static void cactus_pack_b_f16_from_bt(
                     __fp16* dst_t = dst + t * tile_pairs;
                     const size_t col_t = col0 + t * tile_cols;
                     const __fp16* src_col = b_transposed + col_t * K + k0;
-                    const bool has_k1 = (k1 < K);
-                    CACTUS_UNROLL4
-                    for (size_t c = 0; c < tile_cols; ++c) {
-                        dst_t[2 * c] = src_col[0];
-                        dst_t[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
-                        src_col += K;
+                    if (even_k) {
+                        CACTUS_UNROLL4
+                        for (size_t c = 0; c < tile_cols; ++c) {
+                            dst_t[2 * c] = src_col[0];
+                            dst_t[2 * c + 1] = src_col[1];
+                            src_col += K;
+                        }
+                    } else {
+                        const bool has_k1 = (k1 < K);
+                        CACTUS_UNROLL4
+                        for (size_t c = 0; c < tile_cols; ++c) {
+                            dst_t[2 * c] = src_col[0];
+                            dst_t[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                            src_col += K;
+                        }
                     }
                 }
             }
@@ -145,19 +191,26 @@ static void cactus_pack_b_f16_from_bt(
                 const size_t cb = cb4_tiles + cb2_tiles + g1;
                 const size_t col0 = cb * tile_cols;
                 const size_t active_c = (col0 < N) ? std::min(tile_cols, N - col0) : 0;
-                if (active_c == 0) continue;
 
                 const size_t k0 = kp * 2;
                 const size_t k1 = k0 + 1;
                 __fp16* dst = b_packed + off_cb1 + (g1 * k_pairs + kp) * tile_pairs;
                 const __fp16* src_col = b_transposed + col0 * K + k0;
-                const bool has_k1 = (k1 < K);
-
-                CACTUS_UNROLL4
-                for (size_t c = 0; c < active_c; ++c) {
-                    dst[2 * c] = src_col[0];
-                    dst[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
-                    src_col += K;
+                if (even_k) {
+                    CACTUS_UNROLL4
+                    for (size_t c = 0; c < active_c; ++c) {
+                        dst[2 * c] = src_col[0];
+                        dst[2 * c + 1] = src_col[1];
+                        src_col += K;
+                    }
+                } else {
+                    const bool has_k1 = (k1 < K);
+                    CACTUS_UNROLL4
+                    for (size_t c = 0; c < active_c; ++c) {
+                        dst[2 * c] = src_col[0];
+                        dst[2 * c + 1] = has_k1 ? src_col[1] : static_cast<__fp16>(0);
+                        src_col += K;
+                    }
                 }
                 CACTUS_UNROLL4
                 for (size_t c = active_c; c < tile_cols; ++c) {
@@ -223,23 +276,7 @@ static void cactus_matmul_f16_sme2_worker(
             const __fp16* b_g4_base = b_packed + g4 * k_pairs * 4 * tile_pairs;
 
             size_t kp = 0;
-            if constexpr (SME2_K_UNROLL_CB4 >= 8) {
-                for (; kp + 7 < k_pairs; kp += 8) {
-                    for (size_t u = 0; u < 8; ++u) {
-                        const __fp16* a_ptr = a_packed + rb * a_row_block_stride + (kp + u) * tile_pairs;
-                        const __fp16* b_ptr = b_g4_base + (kp + u) * (4 * tile_pairs);
-                        const svfloat16_t zA = svld1(pMh, a_ptr);
-                        const svfloat16x4_t zB4 = svld1_f16_x4(pNh_full_c, b_ptr);
-                        svmopa_za32_f16_m(0, pMh, pNh_full, zA, svget4(zB4, 0));
-                        svmopa_za32_f16_m(1, pMh, pNh_full, zA, svget4(zB4, 1));
-                        svmopa_za32_f16_m(2, pMh, pNh_full, zA, svget4(zB4, 2));
-                        svmopa_za32_f16_m(3, pMh, pNh_full, zA, svget4(zB4, 3));
-                    }
-                }
-            }
-
-            if constexpr (SME2_K_UNROLL_CB4 >= 4) {
-                for (; kp + 3 < k_pairs; kp += 4) {
+            for (; kp + 3 < k_pairs; kp += 4) {
                 const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
                 const __fp16* b_ptr0 = b_g4_base + kp * (4 * tile_pairs);
                 const __fp16* a_ptr1 = a_ptr0 + tile_pairs;
@@ -276,30 +313,6 @@ static void cactus_matmul_f16_sme2_worker(
                 svmopa_za32_f16_m(1, pMh, pNh_full, zA3, svget4(zB43, 1));
                 svmopa_za32_f16_m(2, pMh, pNh_full, zA3, svget4(zB43, 2));
                 svmopa_za32_f16_m(3, pMh, pNh_full, zA3, svget4(zB43, 3));
-            }
-            }
-
-            if constexpr (SME2_K_UNROLL_CB4 >= 2) {
-                for (; kp + 1 < k_pairs; kp += 2) {
-                const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
-                const __fp16* b_ptr0 = b_g4_base + kp * (4 * tile_pairs);
-                const __fp16* a_ptr1 = a_ptr0 + tile_pairs;
-                const __fp16* b_ptr1 = b_ptr0 + 4 * tile_pairs;
-
-                const svfloat16_t zA0 = svld1(pMh, a_ptr0);
-                const svfloat16x4_t zB40 = svld1_f16_x4(pNh_full_c, b_ptr0);
-                svmopa_za32_f16_m(0, pMh, pNh_full, zA0, svget4(zB40, 0));
-                svmopa_za32_f16_m(1, pMh, pNh_full, zA0, svget4(zB40, 1));
-                svmopa_za32_f16_m(2, pMh, pNh_full, zA0, svget4(zB40, 2));
-                svmopa_za32_f16_m(3, pMh, pNh_full, zA0, svget4(zB40, 3));
-
-                const svfloat16_t zA1 = svld1(pMh, a_ptr1);
-                const svfloat16x4_t zB41 = svld1_f16_x4(pNh_full_c, b_ptr1);
-                svmopa_za32_f16_m(0, pMh, pNh_full, zA1, svget4(zB41, 0));
-                svmopa_za32_f16_m(1, pMh, pNh_full, zA1, svget4(zB41, 1));
-                svmopa_za32_f16_m(2, pMh, pNh_full, zA1, svget4(zB41, 2));
-                svmopa_za32_f16_m(3, pMh, pNh_full, zA1, svget4(zB41, 3));
-            }
             }
 
             for (; kp < k_pairs; ++kp) {
@@ -402,25 +415,6 @@ static void cactus_matmul_f16_sme2_worker(
             const __fp16* b_g2_base = b_packed + cb4_groups * k_pairs * 4 * tile_pairs + g2 * k_pairs * 2 * tile_pairs;
 
             size_t kp = 0;
-            if constexpr (SME2_K_UNROLL_CB2 >= 2) {
-                for (; kp + 1 < k_pairs; kp += 2) {
-                const __fp16* a_ptr0 = a_packed + rb * a_row_block_stride + kp * tile_pairs;
-                const __fp16* b_ptr0 = b_g2_base + kp * (2 * tile_pairs);
-                const __fp16* a_ptr1 = a_ptr0 + tile_pairs;
-                const __fp16* b_ptr1 = b_ptr0 + 2 * tile_pairs;
-
-                const svfloat16_t zA0 = svld1(pMh, a_ptr0);
-                const svfloat16x2_t zB20 = svld1_f16_x2(pNh_full_c, b_ptr0);
-                svmopa_za32_f16_m(0, pMh, pNh_full, zA0, svget2(zB20, 0));
-                svmopa_za32_f16_m(1, pMh, pNh_full, zA0, svget2(zB20, 1));
-
-                const svfloat16_t zA1 = svld1(pMh, a_ptr1);
-                const svfloat16x2_t zB21 = svld1_f16_x2(pNh_full_c, b_ptr1);
-                svmopa_za32_f16_m(0, pMh, pNh_full, zA1, svget2(zB21, 0));
-                svmopa_za32_f16_m(1, pMh, pNh_full, zA1, svget2(zB21, 1));
-            }
-            }
-
             for (; kp < k_pairs; ++kp) {
                 const __fp16* a_ptr = a_packed + rb * a_row_block_stride + kp * tile_pairs;
                 const __fp16* b_ptr = b_g2_base + kp * (2 * tile_pairs);
@@ -593,7 +587,7 @@ void cactus_matmul_f16_sme2_caller(
     const size_t row_block_size = SME2_TILES_PER_THREAD * tile_rows;
     const size_t num_row_blocks = (M + row_block_size - 1) / row_block_size;
 
-    CactusThreading::parallel_for(num_row_blocks, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
+    CactusThreading::parallel_for(num_row_blocks, SME2_CALLER_PAR_CONFIG,
         [=](size_t start_block, size_t end_block) {
             cactus_matmul_f16_sme2_thread_entry(
                 a_packed_ptr,
