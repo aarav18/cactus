@@ -11,10 +11,6 @@
 #include <atomic>
 #include <memory>
 
-namespace {
-constexpr size_t SME2_TILES_PER_THREAD = 3;
-}
-
 #if defined(__clang__)
 #define CACTUS_UNROLL4 _Pragma("clang loop unroll_count(4)")
 #else
@@ -215,11 +211,9 @@ static void cactus_matmul_f16_sme2_worker(
     const size_t full_col_blocks = N / tile_rows;
     const size_t cb4_tiles = (full_col_blocks / 4) * 4;
     const size_t cb2_tiles = ((full_col_blocks - cb4_tiles) / 2) * 2;
-    const size_t cb1_tiles = col_blocks - cb4_tiles - cb2_tiles;
     const size_t cb4_groups = cb4_tiles / 4;
     const size_t cb2_groups = cb2_tiles / 2;
     const size_t cb1_off = cb4_groups * k_pairs * 4 * tile_pairs + cb2_groups * k_pairs * 2 * tile_pairs;
-    (void)cb1_tiles;
     const size_t a_row_block_stride = k_pairs * tile_pairs;
 
     const svcount_t pNh_full_c = svptrue_c16();
@@ -563,6 +557,7 @@ void cactus_matmul_f16_sme2_caller(
 ) {
     const size_t tile_rows = svcntsw();
     const size_t tile_pairs = svcnth();
+    constexpr size_t SME2_TILES_PER_THREAD = 3;
 
     const size_t row_blocks = (M + tile_rows - 1) / tile_rows;
     const size_t k_pairs = (K + 1) / 2;
