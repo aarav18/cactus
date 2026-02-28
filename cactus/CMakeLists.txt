@@ -132,16 +132,20 @@ set_property(CACHE ENABLE_SME2 PROPERTY STRINGS AUTO OFF)
 set(BUILD_SME2 0)
 set(SME2_MARCH_FLAG "-march=armv9.2-a+nosve+nosve2+sme2")
 if(ENABLE_SME2 STREQUAL "AUTO")
-	include(CheckCXXCompilerFlag)
-
 	if(APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
-		check_cxx_compiler_flag("-arch arm64 ${SME2_MARCH_FLAG}" COMPILER_SUPPORTS_SME2)
+		include(CheckCXXSourceCompiles)
+		set(CMAKE_REQUIRED_FLAGS "-arch arm64 ${SME2_MARCH_FLAG}")
+		check_cxx_source_compiles("
+			#include <arm_sme.h>
+			int main() { return 0; }
+		" COMPILER_SUPPORTS_SME2)
+		unset(CMAKE_REQUIRED_FLAGS)
 
 		if(COMPILER_SUPPORTS_SME2)
 			set(BUILD_SME2 1)
-			message(STATUS "Toolchain supports SME2 flags - building SME2 kernels")
+			message(STATUS "Toolchain supports SME2 - building SME2 kernels")
 		else()
-			message(STATUS "Compiler does not support SME2 flags - building without SME2")
+			message(STATUS "Compiler does not support SME2 - building without SME2")
 		endif()
 
 	else()
