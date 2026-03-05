@@ -11,6 +11,9 @@
 #include <Accelerate/Accelerate.h>
 constexpr size_t ACCELERATE_M_THRESHOLD = 4;
 constexpr size_t ACCELERATE_K_THRESHOLD = 256;
+#ifdef CACTUS_USE_MPS
+#include "kernel_metal.h"
+#endif
 #endif
 
 // Do NOT Remove: Uncomment for testing on various paths
@@ -188,6 +191,13 @@ void cactus_matmul_f16(
 		);
 		return;
 	}
+#endif
+
+#ifdef CACTUS_USE_MPS
+    if (cactus_metal_available() && (M * N * K) >= MPS_MIN_FLOPS) {
+        cactus_matmul_f16_mps(a, b_transposed, c, M, K, N);
+        return;
+    }
 #endif
 
 #ifdef __APPLE__

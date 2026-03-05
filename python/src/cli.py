@@ -669,6 +669,8 @@ def cmd_build(args):
             "-framework", "Security",
             "-framework", "SystemConfiguration",
             "-framework", "CFNetwork",
+            "-framework", "Metal",
+            "-framework", "MetalPerformanceShaders",
         ]
     else:
         compiler = "g++"
@@ -747,6 +749,8 @@ def cmd_build(args):
                 "-framework", "Security",
                 "-framework", "SystemConfiguration",
                 "-framework", "CFNetwork",
+                "-framework", "Metal",
+                "-framework", "MetalPerformanceShaders",
             ])
             if sdl2_available:
                 cmd.extend(sdl2_lib.split())
