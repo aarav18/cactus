@@ -15,9 +15,10 @@ constexpr size_t ACCELERATE_K_THRESHOLD = 256;
 #include "kernel_metal.h"
 
 static inline bool cactus_should_use_mps_matmul(size_t M, size_t K, size_t N) {
-    return (M >= 512 && K >= 2048 && N >= 1024) ||
-           (M >= 128 && K >= 4096 && N >= 1536) ||
-           (M >= 4 && K >= 4096 && N >= 4096);
+    return (M >= 768 && K >= 2048 && N >= 1280) ||
+           (M >= 256 && K >= 4096 && N >= 2048) ||
+           (M >= 4 && K >= 8192 && N >= 1024) ||
+           (M >= 1 && K >= 4096 && N >= 3072);
 }
 #endif
 #endif
