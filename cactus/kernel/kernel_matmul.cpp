@@ -82,6 +82,19 @@ static inline __fp16 hsum_f16x8(float16x8_t v) {
     return vget_lane_f16(sum1, 0);
 }
 
+#if defined(CACTUS_COMPILE_SME2)
+constexpr size_t SME2_M_THRESHOLD = 4;
+
+void cactus_matmul_f16_sme2_caller(
+    const __fp16* a,
+    const __fp16* b_transposed,
+    __fp16* c,
+    size_t M,
+    size_t K,
+    size_t N
+);
+#endif
+
 static void cactus_matmul_f16_worker(
     const __fp16* a,
     const __fp16* b_transposed,
@@ -167,20 +180,7 @@ static void cactus_matmul_f16_worker(
     }
 }
 
-#if defined(CACTUS_COMPILE_SME2)
-constexpr size_t SME2_M_THRESHOLD = 4;
-
-void cactus_matmul_f16_sme2_caller(
-	const __fp16* a,
-	const __fp16* b_transposed,
-	__fp16* c,
-	size_t M,
-	size_t K,
-	size_t N
-);
-#endif
-
-void cactus_matmul_f16(
+void cactus_matmul_f16_cpu(
     const __fp16* a,
     const __fp16* b_transposed,
     __fp16* c,
@@ -188,22 +188,14 @@ void cactus_matmul_f16(
     size_t K,
     size_t N
 ) {
-
-#ifdef CACTUS_USE_MPS
-    if (cactus_metal_available() && cactus_should_use_mps_matmul(M, K, N)) {
-        cactus_matmul_f16_mps(a, b_transposed, c, M, K, N);
+#if defined(CACTUS_COMPILE_SME2)
+    if (cpu_has_sme2() && M >= SME2_M_THRESHOLD) {
+        cactus_matmul_f16_sme2_caller(
+            a, b_transposed, c,
+            M, K, N
+        );
         return;
     }
-#endif
-
-#if defined(CACTUS_COMPILE_SME2)
-	if (cpu_has_sme2() && M >= SME2_M_THRESHOLD) {
-		cactus_matmul_f16_sme2_caller(
-			a, b_transposed, c,
-			M, K, N
-		);
-		return;
-	}
 #endif
 
 #ifdef __APPLE__
@@ -244,9 +236,26 @@ void cactus_matmul_f16(
                     M, K, N,
                     start_row, end_row
                 );
-
             }
         });
+}
+
+void cactus_matmul_f16(
+    const __fp16* a,
+    const __fp16* b_transposed,
+    __fp16* c,
+    size_t M,
+    size_t K,
+    size_t N
+) {
+
+#ifdef CACTUS_USE_MPS
+    if (cactus_metal_available() && cactus_should_use_mps_matmul(M, K, N)) {
+        cactus_matmul_f16_mps(a, b_transposed, c, M, K, N);
+        return;
+    }
+#endif
+    cactus_matmul_f16_cpu(a, b_transposed, c, M, K, N);
 }
 
 

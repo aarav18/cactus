@@ -880,6 +880,7 @@ void benchmark_gemm_f16_direct(TestUtils::TestRunner& runner, const BenchmarkCon
     std::vector<std::tuple<size_t, size_t, size_t>> shapes = {
         {1, 1024, 1024},
         {1024, 1024, 1024},
+		{1024, 4096, 4096},
     };
 
     for (const auto& [M, K, N] : shapes) {
@@ -941,7 +942,7 @@ void benchmark_gemm_f16_mps(TestUtils::TestRunner& runner, const BenchmarkConfig
 
         // Benchmark CPU path for comparison
         double cpu_ms = time_operation<__fp16>([&]() {
-            cactus_matmul_f16(A.data(), B_T.data(), C_cpu.data(), M, K, N);
+            cactus_matmul_f16_cpu(A.data(), B_T.data(), C_cpu.data(), M, K, N);
         }, config.iterations);
 
         double cpu_gflops = calculate_gflops(2ULL * M * K * N, cpu_ms);
